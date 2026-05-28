@@ -1,0 +1,2529 @@
+import json
+import logging
+import os
+import re
+import hashlib
+import threading
+import time
+import uuid
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, quote, urlparse
+from urllib.request import Request, urlopen
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "plane.settings.production")
+
+import django  # noqa: E402
+
+django.setup()
+
+from django.db import close_old_connections, transaction  # noqa: E402
+from django.utils.html import escape, strip_tags  # noqa: E402
+from plane.db.models import CycleIssue, Issue, IssueComment, IssueLabel, IssueRelation, IssueView, Label, ModuleIssue, Page, Project, ProjectPage, Workspace  # noqa: E402
+
+
+PORT = int(os.environ.get("AIGILE_BACKEND_PORT", "8091"))
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:7b-instruct")
+RAG_BACKEND_URL = os.environ.get("RAG_BACKEND_URL", "http://rag-backend:8092").rstrip("/")
+MATTERMOST_WEBHOOK_URL = os.environ["MATTERMOST_WEBHOOK_URL"]
+MATTERMOST_INTERNAL_URL = os.environ.get("MATTERMOST_INTERNAL_URL", "http://mattermost:8065").rstrip("/")
+MATTERMOST_PUBLIC_URL = os.environ.get("MATTERMOST_PUBLIC_URL", "http://localhost:8065").rstrip("/")
+MATTERMOST_BOT_TOKEN = os.environ.get("MATTERMOST_BOT_TOKEN", "")
+MATTERMOST_DEFAULT_USERNAME = os.environ.get("AIGILE_MATTERMOST_DEFAULT_USERNAME", "admin")
+KB_PATH = Path(os.environ.get("AIGILE_KB_PATH", "/data/knowledge-base/latest.md"))
+LOG_PATH = Path(os.environ.get("AIGILE_LOG_PATH", "/data/logs/manual-trigger.log"))
+REVIEW_GATE_ENABLED = os.environ.get("AIGILE_AI_REVIEW_GATE_ENABLED", "false").lower() == "true"
+REVIEW_HISTORY_PATH = Path(os.environ.get("AIGILE_REVIEW_HISTORY_PATH", "/data/logs/ai-review-history.jsonl"))
+APPLY_HISTORY_PATH = Path(os.environ.get("AIGILE_APPLY_HISTORY_PATH", "/data/logs/ai-apply-history.jsonl"))
+TASK_CHAT_CONTEXT_PATH = Path(os.environ.get("AIGILE_TASK_CHAT_CONTEXT_PATH", "/data/logs/task-chat-context.jsonl"))
+TASK_CHAT_THREAD_ENABLED = os.environ.get("AIGILE_TASK_CHAT_THREAD_ENABLED", "true").lower() == "true"
+TASK_CHAT_POLL_SECONDS = int(os.environ.get("AIGILE_TASK_CHAT_POLL_SECONDS", "8"))
+TASK_CHAT_STATE_PATH = Path(os.environ.get("AIGILE_TASK_CHAT_STATE_PATH", "/data/logs/task-chat-thread-state.json"))
+TASK_CHAT_HISTORY_LIMIT = int(os.environ.get("AIGILE_TASK_CHAT_HISTORY_LIMIT", "10"))
+PLANE_PAGES_WORKSPACE_SLUG = os.environ.get("AIGILE_PLANE_PAGES_WORKSPACE_SLUG", "aigile")
+PLANE_PAGES_PROJECT_IDENTIFIER = os.environ.get("AIGILE_PLANE_PAGES_PROJECT_IDENTIFIER", "AIGILE")
+PLANE_PAGES_COLLECTION = os.environ.get("AIGILE_PLANE_PAGES_COLLECTION", "plane_pages")
+PLANE_PAGES_TITLE_MARKER = os.environ.get("AIGILE_PLANE_PAGES_TITLE_MARKER", "[AI]")
+PLANE_PAGES_BOOTSTRAP_RULES = os.environ.get("AIGILE_PLANE_PAGES_BOOTSTRAP_RULES", "true").lower() == "true"
+REFRESH_HOUR = int(os.environ.get("AIGILE_KB_REFRESH_HOUR", "6"))
+REFRESH_MINUTE = int(os.environ.get("AIGILE_KB_REFRESH_MINUTE", "0"))
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("aigile.manual-trigger")
+
+IN_FLIGHT: set[str] = set()
+IN_FLIGHT_LOCK = threading.Lock()
+
+KNOWN_ISSUE_TYPES = {
+    "bug": "Bug",
+    "баг": "Bug",
+    "ошибка": "Bug",
+    "дефект": "Bug",
+    "story": "Story",
+    "user story": "Story",
+    "история": "Story",
+    "epic": "Epic",
+    "эпик": "Epic",
+    "tech debt": "Tech Debt",
+    "tech-debt": "Tech Debt",
+    "technical debt": "Tech Debt",
+    "техдолг": "Tech Debt",
+    "технический долг": "Tech Debt",
+    "research": "Research",
+    "исследование": "Research",
+    "release": "Release",
+    "релиз": "Release",
+    "task": "Task",
+    "задача": "Task",
+}
+
+AGENT_MAP = {
+    "Bug": ["QA Engineer Agent", "Backend Developer Agent", "Frontend Developer Agent", "Tech Lead Agent"],
+    "Story": ["Product Owner Agent", "System Analyst Agent", "QA Engineer Agent", "UX/UI Agent", "Architect Agent"],
+    "Task": ["Delivery Manager Agent", "Tech Lead Agent", "QA Engineer Agent"],
+    "Epic": ["Product Manager Agent", "Architect Agent", "Delivery Manager Agent", "Security Engineer Agent", "QA Lead Agent"],
+    "Tech Debt": ["Tech Lead Agent", "Architect Agent", "DevOps Agent", "QA Engineer Agent"],
+    "Research": ["Product Manager Agent", "Business Analyst Agent", "Architect Agent"],
+    "Release": ["Release Manager Agent", "QA Lead", "DevOps Agent", "Security Engineer Agent"],
+}
+
+TYPE_LABEL_NAMES = ["Epic", "Story", "Bug", "Task", "Tech Debt", "Research", "Release"]
+TYPE_LABEL_ERROR = "Выбери тип задачи через метку Epic, Story, Bug, Task, Tech Debt, Research или Release."
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def ensure_dirs() -> None:
+    KB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+
+def append_execution_log(event: dict) -> None:
+    ensure_dirs()
+    line = json.dumps({"ts": utc_now_iso(), **event}, ensure_ascii=False)
+    with LOG_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
+
+
+def append_review_history(review: dict) -> None:
+    ensure_dirs()
+    REVIEW_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with REVIEW_HISTORY_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(review, ensure_ascii=False) + "\n")
+
+
+def append_apply_history(event: dict) -> None:
+    ensure_dirs()
+    APPLY_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with APPLY_HISTORY_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+def append_task_chat_context(event: dict) -> None:
+    ensure_dirs()
+    TASK_CHAT_CONTEXT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with TASK_CHAT_CONTEXT_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+def read_task_chat_contexts(limit: int = 200) -> list[dict]:
+    if not TASK_CHAT_CONTEXT_PATH.exists():
+        return []
+    contexts = []
+    with TASK_CHAT_CONTEXT_PATH.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("ok") and event.get("post_id") and event.get("channel_id"):
+                contexts.append(event)
+    return contexts[-limit:]
+
+
+def read_task_chat_state() -> dict:
+    if not TASK_CHAT_STATE_PATH.exists():
+        return {"threads": {}}
+    try:
+        return json.loads(TASK_CHAT_STATE_PATH.read_text(encoding="utf-8") or "{}")
+    except json.JSONDecodeError:
+        return {"threads": {}}
+
+
+def write_task_chat_state(state: dict) -> None:
+    ensure_dirs()
+    TASK_CHAT_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TASK_CHAT_STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def mark_task_chat_thread_started(root_id: str, context_id: str) -> None:
+    if not root_id:
+        return
+    state = read_task_chat_state()
+    threads = state.setdefault("threads", {})
+    thread = threads.setdefault(root_id, {})
+    processed = set(thread.get("processed_post_ids") or [])
+    processed.add(root_id)
+    thread["processed_post_ids"] = sorted(processed)
+    thread["context_id"] = context_id
+    thread["started_at"] = thread.get("started_at") or utc_now_iso()
+    write_task_chat_state(state)
+
+
+def read_review_history(issue_key: str | None = None, limit: int = 20) -> list[dict]:
+    if not REVIEW_HISTORY_PATH.exists():
+        return []
+    reviews = []
+    with REVIEW_HISTORY_PATH.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                review = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if issue_key and review.get("issue_key") != issue_key:
+                continue
+            reviews.append(review)
+    return reviews[-limit:]
+
+
+def find_review_history_item(issue_key: str, review_id: str) -> dict | None:
+    for review in reversed(read_review_history(issue_key, limit=1000)):
+        if review.get("review_id") == review_id:
+            return review
+    return None
+
+
+def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    handler.send_header("Access-Control-Allow-Headers", "Content-Type")
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def read_body(handler: BaseHTTPRequestHandler) -> dict:
+    length = int(handler.headers.get("Content-Length", "0") or "0")
+    if length == 0:
+        return {}
+    raw = handler.rfile.read(length).decode("utf-8")
+    return json.loads(raw or "{}")
+
+
+def issue_to_payload(issue: Issue) -> dict:
+    issue_type = issue.type.name if issue.type else "Task"
+    labels = list(issue.labels.filter(deleted_at__isnull=True).values_list("name", flat=True))
+    return {
+        "id": str(issue.id),
+        "key": f"{issue.project.identifier}-{issue.sequence_id}",
+        "title": issue.name,
+        "description": issue.description_stripped or strip_tags(issue.description_html or "") or "",
+        "priority": issue.priority,
+        "state": issue.state.name if issue.state else "",
+        "state_group": issue.state.group if issue.state else "",
+        "type": issue_type,
+        "labels": labels,
+        "project": {
+            "id": str(issue.project.id),
+            "name": issue.project.name,
+            "identifier": issue.project.identifier,
+        },
+        "workspace": {
+            "id": str(issue.workspace.id),
+            "name": issue.workspace.name,
+            "slug": issue.workspace.slug,
+        },
+        "url": f"http://localhost:8080/{issue.workspace.slug}/browse/{issue.project.identifier}-{issue.sequence_id}",
+    }
+
+
+def compact_issue_payload(issue: Issue | None, description_limit: int = 1200) -> dict | None:
+    if not issue:
+        return None
+    payload = issue_to_payload(issue)
+    description = payload.get("description") or ""
+    if len(description) > description_limit:
+        payload["description"] = description[:description_limit].rstrip() + "..."
+    return payload
+
+
+def build_parent_chain(issue: Issue, limit: int = 5) -> list[dict]:
+    chain = []
+    parent = issue.parent
+    depth = 0
+    while parent and depth < limit:
+        chain.append(compact_issue_payload(parent))
+        parent = parent.parent
+        depth += 1
+    return chain
+
+
+def build_issue_context_graph(issue: Issue) -> dict:
+    issue_key = f"{issue.project.identifier}-{issue.sequence_id}"
+    children = Issue.objects.select_related("workspace", "project", "state", "type").prefetch_related("labels").filter(
+        parent=issue,
+        deleted_at__isnull=True,
+    ).order_by("sequence_id")[:20]
+    outgoing = IssueRelation.objects.select_related(
+        "related_issue",
+        "related_issue__workspace",
+        "related_issue__project",
+        "related_issue__state",
+        "related_issue__type",
+    ).prefetch_related("related_issue__labels").filter(issue=issue, deleted_at__isnull=True)
+    incoming = IssueRelation.objects.select_related(
+        "issue",
+        "issue__workspace",
+        "issue__project",
+        "issue__state",
+        "issue__type",
+    ).prefetch_related("issue__labels").filter(related_issue=issue, deleted_at__isnull=True)
+    cycle_links = CycleIssue.objects.select_related("cycle").filter(issue=issue, deleted_at__isnull=True)
+    module_links = ModuleIssue.objects.select_related("module").filter(issue=issue, deleted_at__isnull=True)
+    latest_review = latest_review_for_issue(issue_key)
+    return {
+        "issue_key": issue_key,
+        "current": compact_issue_payload(issue, description_limit=3000),
+        "parents": [item for item in build_parent_chain(issue) if item],
+        "children": [compact_issue_payload(child, description_limit=700) for child in children],
+        "relations": {
+            "outgoing": [
+                {
+                    "relation_type": relation.relation_type,
+                    "issue": compact_issue_payload(relation.related_issue, description_limit=700),
+                }
+                for relation in outgoing
+            ],
+            "incoming": [
+                {
+                    "relation_type": relation.relation_type,
+                    "issue": compact_issue_payload(relation.issue, description_limit=700),
+                }
+                for relation in incoming
+            ],
+        },
+        "cycles": [
+            {
+                "id": str(link.cycle.id),
+                "name": link.cycle.name,
+                "description": link.cycle.description or "",
+                "start_date": link.cycle.start_date.isoformat() if link.cycle.start_date else None,
+                "end_date": link.cycle.end_date.isoformat() if link.cycle.end_date else None,
+            }
+            for link in cycle_links
+        ],
+        "modules": [
+            {
+                "id": str(link.module.id),
+                "name": link.module.name,
+                "description": link.module.description or "",
+                "status": link.module.status,
+                "start_date": link.module.start_date.isoformat() if link.module.start_date else None,
+                "target_date": link.module.target_date.isoformat() if link.module.target_date else None,
+            }
+            for link in module_links
+        ],
+        "latest_review": latest_review,
+    }
+
+
+def find_issue(payload: dict) -> Issue:
+    issue_id = payload.get("issue_id") or payload.get("id")
+    issue_key = payload.get("issue_key") or payload.get("key")
+    workspace_slug = payload.get("workspace_slug") or payload.get("workspace") or "aigile"
+
+    qs = Issue.objects.select_related("workspace", "project", "state", "type").prefetch_related("labels")
+    qs = qs.filter(deleted_at__isnull=True)
+
+    if issue_id:
+        return qs.get(id=issue_id)
+
+    if issue_key:
+        match = re.match(r"^([A-Za-z0-9_]+)-(\d+)$", str(issue_key).strip())
+        if not match:
+            raise ValueError("issue_key must look like AIGILE-123")
+        identifier, sequence_id = match.group(1).upper(), int(match.group(2))
+        return qs.get(workspace__slug=workspace_slug, project__identifier=identifier, sequence_id=sequence_id)
+
+    project_id = payload.get("project_id")
+    sequence_id = payload.get("sequence_id")
+    if project_id and sequence_id:
+        return qs.get(project_id=project_id, sequence_id=int(sequence_id))
+
+    raise ValueError("Missing issue_id or issue_key")
+
+
+def refresh_knowledge_base() -> str:
+    close_old_connections()
+    ensure_dirs()
+    ws = Workspace.objects.filter(slug="aigile").first()
+    lines = [
+        "# AIGILE Knowledge Base Snapshot",
+        f"Generated: {utc_now_iso()}",
+        "",
+        "AIGILE is an AI-native Delivery Operating System.",
+        "Plane is the source of truth for work items. Mattermost is the notification layer.",
+        "Manual trigger must use this latest local snapshot without waiting for the daily refresh.",
+        "",
+        "## Projects",
+    ]
+    if ws:
+        for project in Project.objects.filter(workspace=ws, deleted_at__isnull=True).order_by("name"):
+            lines.append(f"- {project.name} ({project.identifier}): {project.description or ''}")
+    lines.extend(["", "## Labels"])
+    if ws:
+        labels = Label.objects.filter(workspace=ws, deleted_at__isnull=True).order_by("name").values_list("name", flat=True)
+        lines.extend([f"- {label}" for label in labels])
+    lines.extend(["", "## Views"])
+    if ws:
+        views = IssueView.objects.filter(workspace=ws, deleted_at__isnull=True, archived_at__isnull=True).order_by("name")
+        lines.extend([f"- {view.name}: {view.description or ''}" for view in views])
+    KB_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    append_execution_log({"event": "knowledge_base_refresh", "status": "success", "path": str(KB_PATH)})
+    return str(KB_PATH)
+
+
+def read_knowledge_base() -> str:
+    if not KB_PATH.exists():
+        refresh_knowledge_base()
+    return KB_PATH.read_text(encoding="utf-8")[:12000]
+
+
+def ollama_model_candidates() -> list[str]:
+    candidates = [OLLAMA_MODEL]
+    try:
+        req = Request(f"{OLLAMA_BASE_URL}/api/tags", method="GET")
+        with urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        for item in data.get("models") or []:
+            name = item.get("name") or item.get("model")
+            if name and "embed" not in name.lower() and name not in candidates:
+                candidates.append(name)
+    except Exception as exc:
+        logger.warning("Could not read Ollama model list: %s", exc)
+    return candidates
+
+
+def ollama_chat_completion(messages: list[dict], options: dict | None = None, timeout: int = 180) -> dict:
+    last_error = None
+    for model in ollama_model_candidates():
+        body = {
+            "model": model,
+            "stream": False,
+            "messages": messages,
+            "options": options or {"temperature": 0.2},
+        }
+        req = Request(
+            f"{OLLAMA_BASE_URL}/api/chat",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(req, timeout=timeout) as response:
+                raw = json.loads(response.read().decode("utf-8"))
+            if model != OLLAMA_MODEL:
+                logger.info("Used Ollama fallback model %s because configured model is unavailable", model)
+            return raw
+        except Exception as exc:
+            last_error = exc
+            logger.warning("Ollama model %s failed: %s", model, exc)
+    raise RuntimeError(f"Ollama chat failed for all local models: {last_error}")
+
+
+def post_json(url: str, payload: dict, timeout: int = 90) -> dict:
+    req = Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    with urlopen(req, timeout=timeout) as response:
+        raw = response.read().decode("utf-8")
+    return json.loads(raw) if raw else {}
+
+
+def rag_post(path: str, payload: dict, timeout: int = 90) -> dict:
+    return post_json(f"{RAG_BACKEND_URL}{path}", payload, timeout=timeout)
+
+
+def format_rag_context(matches: list[dict], title: str) -> str:
+    if not matches:
+        return ""
+    parts = [f"## {title}", "These Plane Pages rules are strict project knowledge. If they conflict with generic model behavior, follow Plane Pages."]
+    for index, match in enumerate(matches, start=1):
+        metadata = match.get("metadata") or {}
+        parts.append(
+            f"\n[{index}] {match.get('title') or metadata.get('title')} ({match.get('source_path') or metadata.get('source_path')})\n"
+            f"{str(match.get('text') or '')[:1500]}"
+        )
+    return "\n".join(parts)
+
+
+def read_project_pages_context(query: str, limit: int = 5) -> str:
+    try:
+        result = rag_post(
+            "/rag/query",
+            {"collection": PLANE_PAGES_COLLECTION, "query": query, "limit": limit, "search_limit": 20},
+            timeout=60,
+        )
+        return format_rag_context(result.get("matches") or [], "Plane Pages Project Knowledge")
+    except Exception as exc:
+        logger.warning("Plane Pages RAG context unavailable: %s", exc)
+        return ""
+
+
+def build_review_project_pages_query(issue_payload: dict, detected_type: str, agent_names: list[str]) -> str:
+    return "\n".join([
+        "AIGILE Agent Rules",
+        "AI Review Gate",
+        f"Task type: {detected_type}",
+        "Agents: " + ", ".join(agent_names),
+        issue_payload.get("key", ""),
+        issue_payload.get("title", ""),
+        issue_payload.get("description", ""),
+        "Labels: " + " ".join(issue_payload.get("labels") or []),
+    ])
+
+
+def build_review_context(issue_payload: dict, detected_type: str, agent_names: list[str]) -> str:
+    pages_query = build_review_project_pages_query(issue_payload, detected_type, agent_names)
+    return "\n\n".join(
+        item
+        for item in [read_knowledge_base(), read_project_pages_context(pages_query, limit=8)]
+        if item
+    )
+
+
+def build_task_chat_project_pages_query(issue: dict, user_message: str, thread_history: str) -> str:
+    return "\n".join([
+        "AIGILE Agent Rules",
+        "Task Chat Agent",
+        "Mattermost task thread",
+        "Acceptance Criteria",
+        str(issue.get("key") or ""),
+        str(issue.get("title") or ""),
+        user_message,
+        thread_history[-2000:],
+    ])
+
+
+def next_refresh_delay() -> float:
+    now = datetime.now()
+    target = now.replace(hour=REFRESH_HOUR, minute=REFRESH_MINUTE, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+def scheduler_loop() -> None:
+    while True:
+        try:
+            time.sleep(next_refresh_delay())
+            refresh_knowledge_base()
+            sync_plane_pages_to_rag({"scheduled": True})
+        except Exception as exc:
+            logger.exception("Scheduled KB refresh failed")
+            append_execution_log({"event": "knowledge_base_refresh", "status": "failure", "error": str(exc)})
+            time.sleep(60)
+
+
+def ollama_chat(issue: dict, context: str) -> dict:
+    prompt = f"""
+You are AI Delivery Assistant for AIGILE, an AI-native Delivery Operating System.
+Use the latest local knowledge base context and analyze this Plane work item.
+
+Return STRICT JSON with keys:
+preview_summary, full_analysis, risks, dependencies, acceptance_criteria,
+implementation_plan, codex_prompt, status.
+
+Keep preview_summary short for Mattermost. Make codex_prompt directly usable.
+
+Knowledge base:
+{context}
+
+Issue:
+{json.dumps(issue, ensure_ascii=False, indent=2)}
+"""
+    raw = ollama_chat_completion(
+        [
+            {"role": "system", "content": "You are a concise enterprise delivery AI assistant. Return only valid JSON."},
+            {"role": "user", "content": prompt},
+        ],
+        {"temperature": 0.2},
+    )
+    content = raw.get("message", {}).get("content", "{}").strip()
+    if content.startswith("```"):
+        content = re.sub(r"^```(?:json)?", "", content).strip()
+        content = re.sub(r"```$", "", content).strip()
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        parsed = {
+            "preview_summary": content[:500],
+            "full_analysis": content,
+            "risks": [],
+            "dependencies": [],
+            "acceptance_criteria": [],
+            "implementation_plan": [],
+            "codex_prompt": "",
+            "status": "analysis_ready",
+        }
+    return parsed
+
+
+def as_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [str(value)]
+
+
+def canonical_issue_type(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = re.sub(r"[_\s]+", " ", str(value).strip().lower()).replace("tech debt", "tech-debt")
+    normalized = re.sub(r"^(type|тип)\s*:\s*", "", normalized)
+    return KNOWN_ISSUE_TYPES.get(normalized) or KNOWN_ISSUE_TYPES.get(normalized.replace("-", " "))
+
+
+def detect_issue_type(issue: dict) -> str:
+    for label in issue.get("labels") or []:
+        detected = canonical_issue_type(label)
+        if detected:
+            return detected
+
+    direct = canonical_issue_type(issue.get("type"))
+    if direct and direct != "Task":
+        return direct
+
+    title = issue.get("title") or ""
+    prefix = re.match(
+        r"^\[([^\]]+)\]|^(bug|баг|ошибка|дефект|story|история|epic|эпик|research|исследование|release|релиз|tech debt|tech-debt|техдолг|технический долг|task|задача)\s*:",
+        title.strip(),
+        re.IGNORECASE,
+    )
+    if prefix:
+        detected = canonical_issue_type(prefix.group(1) or prefix.group(2))
+        if detected:
+            return detected
+
+    return "Task"
+
+
+def agents_for_issue_type(issue_type: str) -> list[str]:
+    return AGENT_MAP.get(issue_type, AGENT_MAP["Task"])
+
+
+def overall_review_status(agents: list[dict]) -> str:
+    statuses = [str(agent.get("status") or "").lower() for agent in agents]
+    if "red" in statuses:
+        return "red"
+    if "yellow" in statuses:
+        return "yellow"
+    return "green"
+
+
+def has_meaningful_text(value: str | None) -> bool:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return bool(text)
+
+
+def has_acceptance_signal(value: str | None) -> bool:
+    text = str(value or "").lower()
+    signals = [
+        "acceptance",
+        "criteria",
+        "критер",
+        "приемк",
+        "приёмк",
+        "ожидаем",
+        "готово",
+        "done",
+    ]
+    return any(signal in text for signal in signals)
+
+
+def has_type_label(issue: dict) -> bool:
+    return any(canonical_issue_type(label) for label in issue.get("labels") or [])
+
+
+def deterministic_gate_review(issue_type: str, issue: dict) -> dict | None:
+    findings = []
+    description = issue.get("description")
+
+    if not has_meaningful_text(issue.get("title")):
+        findings.append(
+            {
+                "severity": "high",
+                "title": "Missing title",
+                "description": "Work item has no clear title.",
+                "recommendation": "Add a short title that explains the user-visible problem or delivery goal.",
+                "can_be_applied": False,
+            }
+        )
+
+    if not has_meaningful_text(description):
+        findings.append(
+            {
+                "severity": "high",
+                "title": "Description is missing",
+                "description": "Only the title is filled in. The task cannot be reliably implemented, reviewed, or tested from the current data.",
+                "recommendation": "Add context, expected behavior, current behavior, constraints, and the intended result before sending the task to delivery.",
+                "can_be_applied": False,
+            }
+        )
+    elif issue_type in {"Story", "Task", "Bug", "Epic", "Tech Debt", "Release"} and not has_acceptance_signal(description):
+        findings.append(
+            {
+                "severity": "medium",
+                "title": "Acceptance signal is missing",
+                "description": "The description does not contain clear acceptance criteria or an equivalent expected-result section.",
+                "recommendation": "Add 3-5 verifiable acceptance criteria or expected results.",
+                "can_be_applied": True,
+            }
+        )
+
+    if not findings:
+        return None
+
+    status = "red" if any(item["severity"] == "high" for item in findings) else "yellow"
+    return {
+        "agent_name": "AIGILE Review Gate",
+        "status": status,
+        "summary": "Задача не готова к delivery." if status == "red" else "Задачу лучше уточнить перед delivery.",
+        "findings": [normalize_finding(item) for item in findings],
+        "proposed_task_patch": default_patch(),
+    }
+
+
+def default_patch() -> dict:
+    return {
+        "title": "",
+        "description": "",
+        "acceptance_criteria": [],
+        "test_cases": [],
+        "risks": [],
+        "dependencies": [],
+    }
+
+
+def as_clean_list(value) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if value:
+        return [str(value).strip()]
+    return []
+
+
+def is_blocking_suggestion(agent: dict, finding: dict | None) -> bool:
+    if str(agent.get("status") or "").lower() == "red":
+        return True
+    return bool(finding and str(finding.get("severity") or "").lower() == "high")
+
+
+def red_fill_template(issue_type: str) -> list[str]:
+    templates = {
+        "Bug": [
+            "### Шаблон для заполнения бага",
+            "",
+            "Заполните этот блок вручную и запустите AI анализ повторно.",
+            "",
+            "#### Текущее поведение",
+            "",
+            "Что сейчас происходит:",
+            "",
+            "#### Ожидаемое поведение",
+            "",
+            "Что должно происходить:",
+            "",
+            "#### Шаги воспроизведения",
+            "",
+            "- 1.",
+            "- 2.",
+            "- 3.",
+            "",
+            "#### Окружение",
+            "",
+            "- Стенд: local / staging / production",
+            "- ОС:",
+            "- Браузер:",
+            "- Версия приложения / commit:",
+            "",
+            "#### Влияние",
+            "",
+            "Кого затрагивает и насколько критично:",
+            "",
+            "#### Критерии приемки",
+            "",
+            "- [ ] Баг воспроизводится по описанным шагам.",
+            "- [ ] Причина найдена и описана.",
+            "- [ ] Исправление реализовано.",
+            "- [ ] Добавлена проверка или regression test.",
+            "- [ ] Исправление проверено на нужном окружении.",
+        ],
+        "Story": [
+            "### Шаблон для заполнения Story",
+            "",
+            "Заполните этот блок вручную и запустите AI анализ повторно.",
+            "",
+            "#### Пользовательская ценность",
+            "",
+            "Кому и зачем нужна эта история:",
+            "",
+            "#### User story",
+            "",
+            "Как [роль], я хочу [действие], чтобы [ценность].",
+            "",
+            "#### Acceptance criteria",
+            "",
+            "- [ ]",
+            "- [ ]",
+            "- [ ]",
+            "",
+            "#### Ограничения и зависимости",
+            "",
+            "-",
+            "",
+            "#### Негативные сценарии",
+            "",
+            "-",
+        ],
+        "Task": [
+            "### Шаблон для заполнения Task",
+            "",
+            "Заполните этот блок вручную и запустите AI анализ повторно.",
+            "",
+            "#### Цель",
+            "",
+            "Что нужно сделать и зачем:",
+            "",
+            "#### Контекст",
+            "",
+            "Что уже известно:",
+            "",
+            "#### Что изменить",
+            "",
+            "-",
+            "",
+            "#### Критерии готовности",
+            "",
+            "- [ ]",
+            "- [ ]",
+            "- [ ]",
+            "",
+            "#### Проверка",
+            "",
+            "Как убедиться, что задача выполнена:",
+        ],
+        "Epic": [
+            "### Шаблон для заполнения Epic",
+            "",
+            "Заполните этот блок вручную и запустите AI анализ повторно.",
+            "",
+            "#### Цель эпика",
+            "",
+            "Какую продуктовую цель закрывает эпик:",
+            "",
+            "#### Scope",
+            "",
+            "Что входит:",
+            "",
+            "#### Out of scope",
+            "",
+            "Что не входит:",
+            "",
+            "#### Основные фичи / задачи",
+            "",
+            "-",
+            "",
+            "#### Риски и зависимости",
+            "",
+            "-",
+            "",
+            "#### Definition of Done",
+            "",
+            "- [ ]",
+        ],
+    }
+    return templates.get(issue_type, templates["Task"])
+
+
+def format_ai_comment_markdown(agent: dict, finding: dict | None, issue_type: str = "Task") -> str:
+    patch = agent.get("proposed_task_patch") if isinstance(agent.get("proposed_task_patch"), dict) else {}
+    lines = [
+        "## AI замечание по задаче",
+        "",
+        "AI не менял описание задачи. Ниже — рекомендация для ручной проверки и заполнения.",
+        "",
+        f"- Агент: {agent.get('agent_name') or 'AI Agent'}",
+    ]
+    if finding:
+        lines.extend(
+            [
+                "",
+                "### Было",
+                "",
+                finding.get("description") or finding.get("title") or "В задаче не хватает данных для уверенной передачи в работу.",
+                "",
+                "### Почему это риск",
+                "",
+                risk_text_for_finding(finding),
+                "",
+                "### Стало / что нужно добавить",
+                "",
+                finding.get("recommendation") or "Добавить недостающий контекст и запустить AI анализ повторно.",
+            ]
+        )
+    if is_blocking_suggestion(agent, finding):
+        lines.extend(["", "### Нужно заполнить перед delivery", ""])
+        lines.extend(red_fill_template(issue_type))
+    if agent.get("summary"):
+        lines.extend(["", "### Резюме агента", "", str(agent["summary"])])
+
+    description = str(patch.get("description") or "").strip()
+    if description:
+        lines.extend(["", "### Предложенное описание", "", description])
+
+    sections = [
+        ("Критерии приемки", patch.get("acceptance_criteria")),
+        ("Тест-кейсы", patch.get("test_cases")),
+        ("Риски", patch.get("risks")),
+        ("Зависимости", patch.get("dependencies")),
+    ]
+    for title, items in sections:
+        clean_items = as_clean_list(items)
+        if clean_items:
+            lines.extend(["", f"### {title}", ""])
+            lines.extend([f"- {item}" for item in clean_items])
+
+    if finding and finding.get("description"):
+        lines.extend(["", "### Детали замечания", "", str(finding["description"])])
+
+    return "\n".join(lines).strip() + "\n"
+
+
+def risk_text_for_finding(finding: dict) -> str:
+    severity = str(finding.get("severity") or "").lower()
+    if severity == "high":
+        return "Задачу нельзя надежно реализовать, проверить или передать в работу без уточнения."
+    if severity == "medium":
+        return "Задачу можно обсуждать дальше, но есть риск неверной реализации или неполной проверки."
+    return "Замечание не блокирует работу, но поможет сделать задачу понятнее."
+
+
+def markdown_to_basic_html(markdown: str) -> str:
+    html_lines = []
+    in_list = False
+    for raw_line in markdown.splitlines():
+        line = raw_line.strip()
+        if not line:
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            continue
+        if line.startswith("### "):
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            html_lines.append(f"<h3>{escape(line[4:])}</h3>")
+        elif line.startswith("## "):
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            html_lines.append(f"<h2>{escape(line[3:])}</h2>")
+        elif line.startswith("- "):
+            if not in_list:
+                html_lines.append("<ul>")
+                in_list = True
+            html_lines.append(f"<li>{escape(line[2:])}</li>")
+        else:
+            if in_list:
+                html_lines.append("</ul>")
+                in_list = False
+            html_lines.append(f"<p>{escape(line)}</p>")
+    if in_list:
+        html_lines.append("</ul>")
+    return "\n".join(html_lines)
+
+
+def text_to_description_json(text: str) -> dict:
+    content = []
+    for line in text.splitlines():
+        if line.strip():
+            content.append({"type": "paragraph", "content": [{"type": "text", "text": line.strip()}]})
+        else:
+            content.append({"type": "paragraph"})
+    return {"type": "doc", "content": content or [{"type": "paragraph"}]}
+
+
+def ensure_ai_label(issue: Issue, name: str, description: str, color: str) -> Label:
+    label = Label.objects.filter(workspace=issue.workspace, project=issue.project, name=name, deleted_at__isnull=True).first()
+    if not label:
+        label = Label.objects.create(
+            workspace=issue.workspace,
+            project=issue.project,
+            name=name,
+            description=description,
+            color=color,
+        )
+    return label
+
+
+def ensure_ai_reviewed_label(issue: Issue) -> Label:
+    return ensure_ai_label(issue, "AI-R", "AI reviewed this task.", "#2563EB")
+
+
+def ensure_ai_assisted_label(issue: Issue) -> Label:
+    return ensure_ai_label(issue, "AI-A", "AI added an assistance comment to this task.", "#8B5CF6")
+
+
+def ensure_ai_agent_assisted_label(issue: Issue) -> Label:
+    return ensure_ai_label(issue, "AIA", "AI agent updated this task after approval.", "#06B6D4")
+
+
+def add_issue_label(issue: Issue, label: Label) -> None:
+    if not IssueLabel.objects.filter(workspace=issue.workspace, project=issue.project, issue=issue, label=label, deleted_at__isnull=True).exists():
+        IssueLabel.objects.create(
+            workspace=issue.workspace,
+            project=issue.project,
+            issue=issue,
+            label=label,
+        )
+    if hasattr(issue, "updated_at"):
+        issue.updated_at = datetime.now(timezone.utc)
+        issue.save(update_fields=["updated_at"])
+
+
+def create_issue_comment(issue: Issue, markdown: str) -> IssueComment:
+    actor = getattr(issue, "updated_by", None) or getattr(issue, "created_by", None)
+    return IssueComment.objects.create(
+        workspace=issue.workspace,
+        project=issue.project,
+        issue=issue,
+        actor=actor,
+        created_by=actor,
+        updated_by=actor,
+        comment_html=markdown_to_basic_html(markdown),
+        comment_stripped=markdown,
+        comment_json=text_to_description_json(markdown),
+        access="INTERNAL",
+    )
+
+
+def mark_issue_with_ai_label(issue: Issue, label_kind: str) -> str | None:
+    if not getattr(issue, "workspace", None) or not getattr(issue, "project", None):
+        return None
+    try:
+        if label_kind == "reviewed":
+            label = ensure_ai_reviewed_label(issue)
+        elif label_kind == "assisted":
+            label = ensure_ai_assisted_label(issue)
+        elif label_kind == "agent_assisted":
+            label = ensure_ai_agent_assisted_label(issue)
+        else:
+            return None
+        add_issue_label(issue, label)
+        return label.name
+    except Exception:
+        logger.exception("Failed to add AI label %s", label_kind)
+        return None
+
+
+AGENT_RULES_PAGE_TITLE = "[AI] AIGILE Agent Rules"
+AGENT_RULES_PAGE_MARKDOWN = """# AIGILE Agent Rules
+
+This page is a strict project knowledge source for AIGILE agents. It is approved for RAG because the title contains [AI] and the page is Public.
+
+## Global Rules
+
+- Answer in Russian unless the user asks otherwise.
+- Be concise by default.
+- Use Plane Pages project knowledge as strict rules.
+- Do not update Plane without explicit user approval.
+- If context is insufficient, say what is missing.
+- Keep Mattermost messages readable and avoid long technical dumps.
+
+## AI Review Gate
+
+- Use green only when the task is clear for delivery.
+- Use yellow when the task is usable but would benefit from clarification.
+- Use red when critical context, acceptance criteria, security, QA, architecture, or delivery information is missing.
+- Recommendations must be practical and tied to the task.
+
+## Bug Agent
+
+- Require current behavior, expected behavior, reproduction steps, environment, severity, and acceptance criteria.
+- If a bug lacks reproduction steps, mark at least yellow.
+- If a bug cannot be tested from the description, mark red.
+
+## Story Agent
+
+- Require user value, acceptance criteria, dependencies, and edge cases.
+- Suggest testable acceptance criteria.
+- Keep implementation advice separate from product value.
+
+## Task Chat Agent
+
+- Treat the Mattermost thread as task-scoped memory.
+- When the user asks to add acceptance criteria, create a draft and wait for y/да.
+- Approved acceptance criteria update the Plane description block `Acceptance Criteria`, add `[AI]` to the new line, add label `AIA`, and leave a short summary comment.
+- Other approved updates go to comments unless a narrower approved field-update flow exists.
+
+## Comment Format
+
+- Keep Plane comments short.
+- Include: Пользователь, Запрос, Изменение.
+- Do not paste large internal prompts or stack traces.
+"""
+
+
+def find_plane_pages_project() -> Project:
+    return Project.objects.select_related("workspace").get(
+        workspace__slug=PLANE_PAGES_WORKSPACE_SLUG,
+        identifier=PLANE_PAGES_PROJECT_IDENTIFIER,
+        deleted_at__isnull=True,
+        archived_at__isnull=True,
+    )
+
+
+def plane_page_source_path(project: Project, page: Page) -> str:
+    return f"plane_pages/{project.identifier}/{page.id}.md"
+
+
+def is_plane_page_public(page: Page) -> bool:
+    return int(getattr(page, "access", 1) or 0) == 0
+
+
+def is_plane_page_approved_for_rag(page: Page) -> bool:
+    return (
+        PLANE_PAGES_TITLE_MARKER.lower() in str(page.name or "").lower()
+        and is_plane_page_public(page)
+        and getattr(page, "deleted_at", None) is None
+        and getattr(page, "archived_at", None) is None
+    )
+
+
+def page_body_text(page: Page) -> str:
+    stripped = str(getattr(page, "description_stripped", "") or "").strip()
+    if stripped:
+        return stripped
+    html = str(getattr(page, "description_html", "") or "").strip()
+    return strip_tags(html).strip()
+
+
+def plane_page_document_text(project: Project, page: Page) -> str:
+    body = page_body_text(page)
+    return f"""# {page.name}
+
+Project: {project.name}
+Project identifier: {project.identifier}
+Plane page access: Public
+Updated at: {page.updated_at.isoformat() if page.updated_at else ""}
+
+{body}
+""".strip()
+
+
+def content_hash(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", text).strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def ensure_agent_rules_page(project: Project) -> Page:
+    existing_link = (
+        ProjectPage.objects.select_related("page")
+        .filter(
+            workspace=project.workspace,
+            project=project,
+            page__name=AGENT_RULES_PAGE_TITLE,
+            page__deleted_at__isnull=True,
+            page__archived_at__isnull=True,
+            deleted_at__isnull=True,
+        )
+        .first()
+    )
+    if existing_link:
+        return existing_link.page
+
+    owner = getattr(project, "project_lead", None) or getattr(project, "created_by", None) or getattr(project.workspace, "owner", None)
+    page = Page.objects.create(
+        workspace=project.workspace,
+        name=AGENT_RULES_PAGE_TITLE,
+        description_html=markdown_to_basic_html(AGENT_RULES_PAGE_MARKDOWN),
+        description_stripped=AGENT_RULES_PAGE_MARKDOWN,
+        description_json=text_to_description_json(AGENT_RULES_PAGE_MARKDOWN),
+        owned_by=owner,
+        access=0,
+        created_by=owner,
+        updated_by=owner,
+    )
+    ProjectPage.objects.create(
+        workspace=project.workspace,
+        project=project,
+        page=page,
+        created_by=owner,
+        updated_by=owner,
+    )
+    return page
+
+
+def plane_page_metadata(project: Project, page: Page, text: str) -> dict:
+    digest = content_hash(text)
+    author = getattr(getattr(page, "updated_by", None), "email", None) or getattr(getattr(page, "owned_by", None), "email", None) or "plane"
+    return {
+        "source_type": "plane_page",
+        "collection": PLANE_PAGES_COLLECTION,
+        "title": page.name,
+        "author": author,
+        "project": project.name,
+        "tags": ["plane", "pages", "ai-approved", project.identifier],
+        "created_at": page.created_at.isoformat() if page.created_at else utc_now_iso(),
+        "updated_at": page.updated_at.isoformat() if page.updated_at else utc_now_iso(),
+        "version": f"{page.updated_at.isoformat() if page.updated_at else utc_now_iso()}:{digest[:12]}",
+        "language": "ru",
+        "access_level": "public",
+        "source_path": plane_page_source_path(project, page),
+        "plane_page_id": str(page.id),
+        "plane_project_id": str(project.id),
+        "plane_project_identifier": project.identifier,
+        "plane_page_access": "public",
+        "content_sha256": digest,
+        "dedupe": False,
+    }
+
+
+def sync_plane_pages_to_rag(payload: dict | None = None) -> dict:
+    close_old_connections()
+    started = time.time()
+    project = find_plane_pages_project()
+    if PLANE_PAGES_BOOTSTRAP_RULES:
+        ensure_agent_rules_page(project)
+
+    links = (
+        ProjectPage.objects.select_related("page")
+        .filter(
+            workspace=project.workspace,
+            project=project,
+            deleted_at__isnull=True,
+            page__deleted_at__isnull=True,
+            page__archived_at__isnull=True,
+        )
+        .order_by("page__updated_at")
+    )
+    seen_page_ids: set[str] = set()
+    indexed = []
+    skipped = []
+    active_source_paths: list[str] = []
+
+    for link in links:
+        page = link.page
+        page_id = str(page.id)
+        if page_id in seen_page_ids:
+            continue
+        seen_page_ids.add(page_id)
+        source_path = plane_page_source_path(project, page)
+        if not is_plane_page_approved_for_rag(page):
+            skipped.append({"page_id": page_id, "title": page.name, "reason": "not_public_or_missing_ai_marker"})
+            continue
+        text = plane_page_document_text(project, page)
+        if not page_body_text(page):
+            skipped.append({"page_id": page_id, "title": page.name, "reason": "empty_page"})
+            continue
+        metadata = plane_page_metadata(project, page, text)
+        active_source_paths.append(source_path)
+        rag_post("/rag/delete-source", {"collection": PLANE_PAGES_COLLECTION, "source_path": source_path}, timeout=60)
+        result = rag_post(
+            "/rag/ingest-text",
+            {"collection": PLANE_PAGES_COLLECTION, "text": text, "metadata": metadata},
+            timeout=120,
+        )
+        indexed.append({
+            "page_id": page_id,
+            "title": page.name,
+            "source_path": source_path,
+            "chunks": result.get("chunks", 0),
+            "content_sha256": metadata["content_sha256"],
+        })
+
+    stale = rag_post(
+        "/rag/delete-stale-sources",
+        {
+            "collection": PLANE_PAGES_COLLECTION,
+            "source_type": "plane_page",
+            "project": project.name,
+            "active_source_paths": active_source_paths,
+        },
+        timeout=120,
+    )
+    event = {
+        "event": "plane_pages_sync",
+        "status": "success",
+        "project": project.name,
+        "collection": PLANE_PAGES_COLLECTION,
+        "indexed": len(indexed),
+        "skipped": len(skipped),
+        "deleted": stale.get("deleted_count", 0),
+        "duration_seconds": round(time.time() - started, 3),
+    }
+    append_execution_log(event)
+    return {
+        "ok": True,
+        "project": project.name,
+        "project_identifier": project.identifier,
+        "collection": PLANE_PAGES_COLLECTION,
+        "indexed": indexed,
+        "skipped": skipped,
+        "deleted": stale.get("deleted", []),
+        "duration_seconds": event["duration_seconds"],
+    }
+
+
+def find_agent_review(review: dict, agent_name: str | None = None, agent_index: int | None = None) -> dict:
+    agents = review.get("agents") if isinstance(review.get("agents"), list) else []
+    if agent_name:
+        for agent in agents:
+            if agent.get("agent_name") == agent_name:
+                return agent
+    if agent_index is not None and 0 <= agent_index < len(agents):
+        return agents[agent_index]
+    raise ValueError("Agent review was not found")
+
+
+def run_apply_review_suggestion(payload: dict) -> dict:
+    if not REVIEW_GATE_ENABLED:
+        return {"ok": False, "disabled": True, "error": "AI Review Gate is disabled"}
+
+    review_id = str(payload.get("review_id") or "").strip()
+    if not review_id:
+        raise ValueError("Missing review_id")
+
+    close_old_connections()
+    issue = find_issue(payload)
+    issue_payload = issue_to_payload(issue)
+    issue_key = issue_payload["key"]
+    review = find_review_history_item(issue_key, review_id)
+    if not review:
+        raise ValueError("Review history item was not found")
+
+    agent_index = payload.get("agent_index")
+    if agent_index is not None:
+        agent_index = int(agent_index)
+    agent = find_agent_review(review, payload.get("agent_name"), agent_index)
+
+    finding = None
+    finding_index = payload.get("finding_index")
+    findings = agent.get("findings") if isinstance(agent.get("findings"), list) else []
+    if finding_index is not None and findings:
+        index = int(finding_index)
+        if 0 <= index < len(findings):
+            finding = findings[index]
+
+    markdown_block = format_ai_comment_markdown(agent, finding, review.get("detected_type") or issue_payload.get("type") or "Task")
+    before = {
+        "description_html": issue.description_html or "",
+        "description_stripped": issue.description_stripped or "",
+        "labels": list(issue.labels.filter(deleted_at__isnull=True).values_list("name", flat=True)),
+    }
+
+    with transaction.atomic():
+        comment = create_issue_comment(issue, markdown_block)
+        label_name = mark_issue_with_ai_label(issue, "assisted")
+
+    issue.refresh_from_db()
+    after = {
+        "description_html": issue.description_html or "",
+        "description_stripped": issue.description_stripped or "",
+        "labels": list(issue.labels.filter(deleted_at__isnull=True).values_list("name", flat=True)),
+        "comment_id": str(comment.id),
+    }
+    apply_id = str(uuid.uuid4())
+    event = {
+        "ok": True,
+        "apply_id": apply_id,
+        "review_id": review_id,
+        "issue_key": issue_key,
+        "agent_name": agent.get("agent_name"),
+        "finding": finding,
+        "applied_at": utc_now_iso(),
+        "applied_by": payload.get("applied_by") or "Plane UI",
+        "comment_id": str(comment.id),
+        "comment": markdown_block,
+        "before": before,
+        "after": after,
+    }
+    append_apply_history(event)
+    append_execution_log({"event": "ai_review_apply", "status": "success", "issue_key": issue_key, "review_id": review_id, "apply_id": apply_id})
+    return {
+        "ok": True,
+        "status": "applied",
+        "apply_id": apply_id,
+        "review_id": review_id,
+        "issue_key": issue_key,
+        "agent_name": agent.get("agent_name"),
+        "label": label_name or "AI-A",
+        "comment_id": str(comment.id),
+        "message": "AI замечание добавлено в комментарии задачи.",
+    }
+
+
+def mattermost_api(path: str, method: str = "GET", payload=None) -> dict:
+    if not MATTERMOST_BOT_TOKEN:
+        raise RuntimeError("Mattermost bot token is not configured")
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    req = Request(
+        f"{MATTERMOST_INTERNAL_URL}{path}",
+        data=data,
+        headers={
+            "Authorization": f"Bearer {MATTERMOST_BOT_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        method=method,
+    )
+    with urlopen(req, timeout=30) as response:
+        body = response.read().decode("utf-8")
+        if response.status >= 300:
+            raise RuntimeError(f"Mattermost returned HTTP {response.status}")
+        return json.loads(body or "{}")
+
+
+def resolve_mattermost_user(username: str) -> dict:
+    clean_username = (username or MATTERMOST_DEFAULT_USERNAME).strip().lstrip("@")
+    if not clean_username:
+        raise ValueError("Mattermost username is required")
+    return mattermost_api(f"/api/v4/users/username/{quote(clean_username)}")
+
+
+def create_direct_channel(target_user_id: str) -> dict:
+    me = mattermost_api("/api/v4/users/me")
+    return mattermost_api("/api/v4/channels/direct", "POST", [me["id"], target_user_id])
+
+
+def post_mattermost_channel_message(channel_id: str, message: str, root_id: str | None = None) -> dict:
+    payload = {"channel_id": channel_id, "message": message}
+    if root_id:
+        payload["root_id"] = root_id
+    return mattermost_api("/api/v4/posts", "POST", payload)
+
+
+def mattermost_current_user() -> dict:
+    return mattermost_api("/api/v4/users/me")
+
+
+def mattermost_thread_posts(root_id: str) -> list[dict]:
+    data = mattermost_api(f"/api/v4/posts/{quote(root_id)}/thread")
+    posts = data.get("posts") or {}
+    order = data.get("order") or []
+    if order:
+        return [posts[post_id] for post_id in order if post_id in posts]
+    return sorted(posts.values(), key=lambda item: item.get("create_at") or 0)
+
+
+def latest_review_for_issue(issue_key: str) -> dict | None:
+    reviews = read_review_history(issue_key, limit=1)
+    return reviews[-1] if reviews else None
+
+
+def summarize_review_agents(review: dict | None) -> str:
+    if not review:
+        return "- AI анализ ещё не найден. Запусти `AI анализ` в Plane, чтобы я получил свежие замечания."
+    lines = []
+    for agent in review.get("agents") or []:
+        name = agent.get("agent_name") or "AI Agent"
+        status = agent.get("status") or "yellow"
+        summary = agent.get("summary") or "без краткого вывода"
+        lines.append(f"- **{name}**: `{status}` — {summary}")
+    return "\n".join(lines) if lines else "- В AI анализе нет агентских замечаний."
+
+
+def summarize_context_graph(graph: dict) -> str:
+    parts = []
+    parents = graph.get("parents") or []
+    if parents:
+        parts.append("**Родительский контекст:**")
+        for parent in parents:
+            parts.append(f"- `{parent['key']}` {parent['title']} — {parent.get('state') or 'без статуса'}")
+            if parent.get("description"):
+                parts.append(f"  Требования/контекст: {parent['description'][:260]}")
+    children = graph.get("children") or []
+    if children:
+        parts.append("**Дочерние задачи:**")
+        for child in children[:8]:
+            parts.append(f"- `{child['key']}` {child['title']} — {child.get('state') or 'без статуса'}")
+    modules = graph.get("modules") or []
+    if modules:
+        parts.append("**Модули:**")
+        for module in modules:
+            detail = f" — {module['description'][:180]}" if module.get("description") else ""
+            parts.append(f"- {module['name']} (`{module.get('status') or 'unknown'}`){detail}")
+    cycles = graph.get("cycles") or []
+    if cycles:
+        parts.append("**Циклы:**")
+        for cycle in cycles:
+            parts.append(f"- {cycle['name']}")
+    outgoing = (graph.get("relations") or {}).get("outgoing") or []
+    incoming = (graph.get("relations") or {}).get("incoming") or []
+    if outgoing or incoming:
+        parts.append("**Связанные задачи:**")
+        for relation in outgoing[:8]:
+            related = relation.get("issue") or {}
+            parts.append(f"- `{related.get('key')}` {related.get('title')} ({relation.get('relation_type')})")
+        for relation in incoming[:8]:
+            related = relation.get("issue") or {}
+            parts.append(f"- `{related.get('key')}` {related.get('title')} (incoming: {relation.get('relation_type')})")
+    return "\n".join(parts) if parts else "Связанный контекст пока не найден."
+
+
+def format_task_chat_message(graph: dict, context_id: str) -> str:
+    issue = graph["current"]
+    review = graph.get("latest_review")
+    issue_url = issue.get("url") or f"http://localhost:8080/{issue['workspace']['slug']}/browse/{issue['key']}"
+    status = review.get("overall_status") if review else "not reviewed"
+    detected_type = review.get("detected_type") if review else detect_issue_type(issue)
+    agents = summarize_review_agents(review)
+    graph_summary = summarize_context_graph(graph)
+    return f"""**AIGILE Task Agent подключился к задаче** `{issue['key']}`
+
+**Задача:** {issue['title']}
+**Тип:** `{detected_type}`
+**Статус AI review:** `{status}`
+**Plane:** {issue_url}
+
+Я буду держать контекст этой задачи в этом чате: описание, метки, статус, связи и последний AI review.
+
+**Что уже вижу по агентам:**
+{agents}
+
+**Контекст вокруг задачи:**
+{graph_summary}
+
+Можешь отвечать сюда как в обычный чат по задаче. Если я подготовлю изменение для Plane, подтверди его коротко: `y` / `да`, или отклони: `n` / `нет`.
+
+Контекст чата: `{context_id}`"""
+
+
+def latest_contexts_by_root() -> dict[str, dict]:
+    result = {}
+    for context in read_task_chat_contexts():
+        root_id = context.get("thread_root_id") or context.get("post_id")
+        if root_id:
+            result[root_id] = context
+    return result
+
+
+def task_chat_history(posts: list[dict], root_id: str, bot_user_id: str, limit: int | None = None) -> str:
+    limit = limit or TASK_CHAT_HISTORY_LIMIT
+    lines = []
+    for post in posts:
+        post_id = post.get("id")
+        if not post_id or post_id == root_id:
+            continue
+        message = re.sub(r"\s+", " ", str(post.get("message") or "")).strip()
+        if not message:
+            continue
+        speaker = "AI Agent" if post.get("user_id") == bot_user_id else "User"
+        lines.append(f"{speaker}: {message[:900]}")
+    return "\n".join(lines[-limit:])
+
+
+def compact_graph_for_prompt(graph: dict) -> dict:
+    current = graph.get("current") or {}
+    review = graph.get("latest_review") or {}
+    return {
+        "current": current,
+        "parents": graph.get("parents") or [],
+        "children": graph.get("children") or [],
+        "relations": graph.get("relations") or {},
+        "cycles": graph.get("cycles") or [],
+        "modules": graph.get("modules") or [],
+        "latest_review": {
+            "review_id": review.get("review_id"),
+            "detected_type": review.get("detected_type"),
+            "overall_status": review.get("overall_status"),
+            "agents": [
+                {
+                    "agent_name": agent.get("agent_name"),
+                    "status": agent.get("status"),
+                    "summary": agent.get("summary"),
+                    "findings": agent.get("findings") or [],
+                }
+                for agent in (review.get("agents") or [])
+            ],
+        }
+        if review
+        else None,
+    }
+
+
+def load_fresh_task_graph(context: dict) -> dict:
+    issue_key = context.get("issue_key") or (context.get("issue") or {}).get("key")
+    if issue_key:
+        try:
+            issue = find_issue({"workspace_slug": "aigile", "issue_key": issue_key})
+            return build_issue_context_graph(issue)
+        except Exception as exc:
+            logger.warning("Failed to refresh task chat graph for %s: %s", issue_key, exc)
+    return context.get("context_graph") or {"current": context.get("issue") or {}}
+
+
+def generate_task_chat_reply(context: dict, user_message: str, thread_history: str) -> str:
+    graph = load_fresh_task_graph(context)
+    issue = (graph.get("current") or context.get("issue") or {})
+    project_pages_context = read_project_pages_context(
+        build_task_chat_project_pages_query(issue, user_message, thread_history),
+        limit=8,
+    )
+    prompt = f"""
+Ты AIGILE Task Agent. Пользователь пишет в Mattermost thread конкретной задачи Plane.
+
+Отвечай по-русски, коротко и полезно. Держи контекст задачи, родительского эпика, связей,
+модулей, циклов и последнего AI review. Если пользователь просит изменить Plane,
+не применяй изменение сам: подготовь предложение и попроси подтверждение `y` / `да`.
+Если Plane Pages project knowledge содержит шаблон или правило формата, используй его строго.
+
+Задача: {issue.get("key")} {issue.get("title")}
+
+Контекст задачи:
+{json.dumps(compact_graph_for_prompt(graph), ensure_ascii=False, indent=2)[:16000]}
+
+Plane Pages project knowledge:
+{project_pages_context or "Нет найденных approved Plane Pages для этого вопроса."}
+
+История thread:
+{thread_history or "Истории пока нет."}
+
+Новое сообщение пользователя:
+{user_message}
+"""
+    try:
+        raw = ollama_chat_completion(
+            [
+                {
+                    "role": "system",
+                    "content": "Ты локальный AI-агент AIGILE для обсуждения Plane-задач в Mattermost. Не используешь облачные API.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            {"temperature": 0.2},
+        )
+        answer = str(raw.get("message", {}).get("content") or "").strip()
+    except Exception as exc:
+        logger.exception("Task chat LLM reply failed")
+        append_execution_log({
+            "event": "task_chat_reply",
+            "status": "failure",
+            "issue_key": issue.get("key"),
+            "error": str(exc),
+        })
+        answer = ""
+    if not answer:
+        answer = "Не смог получить ответ от локальной модели. Контекст задачи сохранён, попробуй повторить вопрос через минуту."
+    return answer[:12000]
+
+
+def normalize_chat_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def is_task_chat_approval(value: str) -> bool:
+    text = normalize_chat_text(value).strip(" .!,;:")
+    approval_terms = {"y", "yes", "да"}
+    return text in approval_terms
+
+
+def is_task_chat_cancel(value: str) -> bool:
+    text = normalize_chat_text(value).strip(" .!,;:")
+    cancel_terms = {"n", "no", "нет"}
+    return text in cancel_terms
+
+
+def looks_like_task_update_request(value: str) -> bool:
+    text = normalize_chat_text(value)
+    patterns = [
+        "!ac",
+        "!note",
+        "!risk",
+        "!dep",
+        "!deadline",
+        "добав",
+        "обнов",
+        "измени",
+        "запиши",
+        "зафиксируй",
+        "поставь",
+        "срок",
+        "дедлайн",
+        "acceptance",
+        "criteria",
+        "критер",
+        "добавь это в задачу",
+        "update task",
+        "add to task",
+    ]
+    return any(pattern in text for pattern in patterns)
+
+
+def append_thread_dialogue(thread_state: dict, role: str, message: str, post_id: str | None = None) -> None:
+    history = thread_state.setdefault("dialogue_history", [])
+    history.append({
+        "role": role,
+        "message": str(message or "")[:4000],
+        "post_id": post_id,
+        "ts": utc_now_iso(),
+    })
+    del history[:-TASK_CHAT_HISTORY_LIMIT * 2]
+
+
+def state_dialogue_history(thread_state: dict) -> str:
+    lines = []
+    for item in thread_state.get("dialogue_history") or []:
+        role = item.get("role") or "message"
+        message = re.sub(r"\s+", " ", str(item.get("message") or "")).strip()
+        if message:
+            lines.append(f"{role}: {message[:900]}")
+    return "\n".join(lines[-TASK_CHAT_HISTORY_LIMIT:])
+
+
+def detect_task_chat_command(value: str) -> dict:
+    raw = str(value or "").strip()
+    match = re.match(r"^!(ac|note|risk|dep|deadline)\b[:\s-]*(.*)$", raw, re.IGNORECASE | re.DOTALL)
+    if match:
+        command = match.group(1).lower()
+    elif re.search(r"\baccept(?:a|e)nce\b|\bcriteria\b|критер", raw, re.IGNORECASE):
+        command = "ac"
+    else:
+        command = "note"
+    content = (match.group(2).strip() if match else raw)
+    mapping = {
+        "ac": {
+            "command": "!ac",
+            "section_title": "Acceptance criteria",
+            "change_kind": "acceptance criteria",
+        },
+        "note": {
+            "command": "!note",
+            "section_title": "Task note",
+            "change_kind": "task note",
+        },
+        "risk": {
+            "command": "!risk",
+            "section_title": "Risk",
+            "change_kind": "risk note",
+        },
+        "dep": {
+            "command": "!dep",
+            "section_title": "Dependency",
+            "change_kind": "dependency note",
+        },
+        "deadline": {
+            "command": "!deadline",
+            "section_title": "Deadline note",
+            "change_kind": "deadline note",
+        },
+    }
+    result = dict(mapping.get(command, mapping["note"]))
+    result["content"] = content or raw
+    return result
+
+
+def is_referential_task_add_request(value: str) -> bool:
+    text = normalize_chat_text(value)
+    patterns = [
+        "добавь их",
+        "добавь это",
+        "добавь в задачу",
+        "добавь это в задачу",
+        "запиши их",
+        "зафиксируй их",
+        "add them",
+        "add this",
+        "add it to task",
+    ]
+    return any(pattern in text for pattern in patterns)
+
+
+def extract_recent_acceptance_criteria(thread_history: str) -> str:
+    lines = [line.strip() for line in str(thread_history or "").splitlines() if line.strip()]
+    for line in reversed(lines):
+        lowered = line.lower()
+        if not (line.startswith(("AI Agent:", "assistant:")) and ("[ai]" in lowered or "acceptance criteria" in lowered or "критер" in lowered)):
+            continue
+        text = re.sub(r"^(?:AI Agent|assistant):\s*", "", line, flags=re.IGNORECASE).strip()
+        if re.search(r"\[AI\]", text, re.IGNORECASE):
+            text = text[text.lower().find("[ai]") :]
+            text = re.sub(r"\s*\[AI\]\s*", "\n", text, flags=re.IGNORECASE)
+            items = [item.strip(" -:;") for item in text.splitlines() if item.strip(" -:;")]
+            return "\n".join(items).strip()
+        marker = re.search(r"accept(?:a|e)nce criteria|критерии приемки", text, re.IGNORECASE)
+        if marker:
+            return text[marker.end() :].strip(" :-")
+    return ""
+
+
+AC_HEADING_RE = re.compile(r"^\s{0,3}(?:#{1,6}\s*)?(?:accept(?:a|e)nce criteria|критерии приемки)\s*:?\s*$", re.IGNORECASE)
+MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+\S+")
+
+
+def current_issue_description_text(issue: Issue) -> str:
+    stripped = str(getattr(issue, "description_stripped", "") or "").strip()
+    if stripped:
+        return stripped
+    html = str(getattr(issue, "description_html", "") or "")
+    return strip_tags(html).strip()
+
+
+def normalize_ac_requirement(value: str | None) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"^!ac\b[:\s-]*", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def acceptance_criteria_items(value: str | None) -> list[str]:
+    raw = str(value or "").strip()
+    raw = re.sub(r"^!ac\b[:\s-]*", "", raw, flags=re.IGNORECASE).strip()
+    if not raw:
+        return []
+    source_lines = raw.splitlines() if "\n" in raw else [raw]
+    items = []
+    for line in source_lines:
+        text = re.sub(r"^\s*[-*]\s*", "", line).strip()
+        text = re.sub(r"^\[AI\]\s*", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"\s+", " ", text)
+        if text:
+            items.append(text)
+    return items
+
+
+def add_ai_acceptance_criteria(description: str, requirement: str) -> tuple[str, bool]:
+    requirements = acceptance_criteria_items(requirement)
+    if not requirements:
+        return description, False
+    existing = re.sub(r"\s+", " ", description or "").casefold()
+    lines_to_add = []
+    for item in requirements:
+        comparable = re.sub(r"\s+", " ", item).casefold()
+        if comparable and comparable not in existing:
+            lines_to_add.append(f"- [AI] {item}")
+            existing = f"{existing} {comparable}"
+    if not lines_to_add:
+        return description, False
+
+    lines = (description or "").splitlines()
+    heading_index = None
+    for index, existing_line in enumerate(lines):
+        if AC_HEADING_RE.match(existing_line):
+            heading_index = index
+            break
+
+    if heading_index is None:
+        next_lines = list(lines)
+        if next_lines and next_lines[-1].strip():
+            next_lines.append("")
+        next_lines.extend(["## Acceptance Criteria", *lines_to_add])
+        return "\n".join(next_lines).strip() + "\n", True
+
+    insert_at = heading_index + 1
+    while insert_at < len(lines):
+        candidate = lines[insert_at]
+        if insert_at > heading_index + 1 and MARKDOWN_HEADING_RE.match(candidate):
+            break
+        insert_at += 1
+    next_lines = list(lines)
+    for offset, line in enumerate(lines_to_add):
+        next_lines.insert(insert_at + offset, line)
+    return "\n".join(next_lines).strip() + "\n", True
+
+
+def update_issue_description_text(issue: Issue, description: str) -> None:
+    issue.description_stripped = description
+    issue.description_html = markdown_to_basic_html(description)
+    issue.description_json = text_to_description_json(description)
+    issue.save(update_fields=["description_html", "description_stripped", "description_json"])
+
+
+def format_task_chat_apply_summary(draft: dict, change_summary: str) -> str:
+    requested = str(draft.get("requested_message") or "").strip()
+    return f"""## AI summary
+
+Пользователь: Mattermost task thread
+Запрос: {requested}
+Изменение: {change_summary}
+"""
+
+
+def build_task_update_draft(context: dict, user_message: str, thread_history: str) -> dict:
+    graph = load_fresh_task_graph(context)
+    issue = graph.get("current") or context.get("issue") or {}
+    issue_key = issue.get("key") or context.get("issue_key")
+    issue_title = issue.get("title") or "Plane task"
+    draft_id = str(uuid.uuid4())
+    command = detect_task_chat_command(user_message)
+    resolved_from_thread = False
+    if command.get("command") == "!note" and is_referential_task_add_request(user_message):
+        resolved_acceptance_criteria = extract_recent_acceptance_criteria(thread_history)
+        if resolved_acceptance_criteria:
+            command = detect_task_chat_command(f"!ac {resolved_acceptance_criteria}")
+            resolved_from_thread = True
+    section_title = command.get("section_title")
+    proposed_text = command.get("content") or user_message.strip()
+    comment_markdown = f"""## AI draft from Mattermost
+
+Task: `{issue_key}` {issue_title}
+
+### {section_title}
+{proposed_text}
+
+### Proposed change
+Add this {command.get("change_kind")} to the task history as an approved AI-assisted note. Do not overwrite the task description.
+
+### Context used
+- Parent items, linked tasks, modules, cycles, and latest AI review were available to the agent.
+- Dialogue history in this Mattermost thread was considered.
+
+### Safety
+This draft will be added as a Plane comment only after explicit approval.
+"""
+    return {
+        "draft_id": draft_id,
+        "issue_key": issue_key,
+        "issue_title": issue_title,
+        "requested_message": user_message.strip(),
+        "proposed_text": proposed_text,
+        "command": command,
+        "resolved_from_thread": resolved_from_thread,
+        "thread_history": thread_history[-5000:],
+        "comment_markdown": comment_markdown,
+        "created_at": utc_now_iso(),
+        "status": "pending_approval",
+    }
+
+
+def format_task_update_draft(draft: dict) -> str:
+    command = (draft.get("command") or {}).get("command")
+    if command == "!ac":
+        apply_steps = """- обновлю блок `Acceptance Criteria` в описании задачи;
+- добавлю новую строку с пометкой `[AI]`;
+- поставлю метку `AIA`;
+- оставлю короткое резюме в комментарии;
+- сохраню событие в истории AI-действий."""
+    else:
+        apply_steps = """- добавлю это в задачу отдельным комментарием;
+- не буду перетирать описание;
+- поставлю метку `AI-A`;
+- сохраню событие в истории AI-действий."""
+    return f"""**Черновик изменения готов, но я его ещё не применил.**
+
+Задача: `{draft.get("issue_key")}` {draft.get("issue_title")}
+
+Что предлагаю добавить в Plane:
+
+```text
+{draft.get("proposed_text") or draft.get("requested_message") or ""}
+```
+
+Как применю после подтверждения:
+{apply_steps}
+
+Чтобы применить, ответь в этом треде: `y` или `да`.
+Чтобы отменить: `n` или `нет`."""
+
+
+def apply_task_update_draft(context: dict, draft: dict, approved_by: str) -> dict:
+    issue_key = draft.get("issue_key") or context.get("issue_key")
+    if not issue_key:
+        raise ValueError("Draft has no issue key")
+    issue = find_issue({"workspace_slug": "aigile", "issue_key": issue_key})
+    command = draft.get("command") if isinstance(draft.get("command"), dict) else {}
+    is_acceptance_criteria = command.get("command") == "!ac"
+    description_updated = False
+    duplicate = False
+    if is_acceptance_criteria:
+        before_description = current_issue_description_text(issue)
+        updated_description, changed = add_ai_acceptance_criteria(before_description, command.get("content") or draft.get("proposed_text") or draft.get("requested_message") or "")
+        if changed:
+            update_issue_description_text(issue, updated_description)
+            description_updated = True
+            change_summary = "добавлен пункт Acceptance Criteria в описание задачи с пометкой [AI]."
+        else:
+            duplicate = True
+            change_summary = "похожий пункт Acceptance Criteria уже был в описании, повторно не добавлял."
+        comment_markdown = format_task_chat_apply_summary(draft, change_summary)
+        label_name = mark_issue_with_ai_label(issue, "agent_assisted")
+    else:
+        comment_markdown = draft.get("comment_markdown") or draft.get("requested_message") or ""
+        label_name = mark_issue_with_ai_label(issue, "assisted")
+        change_summary = "добавлен approved AI-комментарий."
+    comment = create_issue_comment(issue, comment_markdown)
+    apply_id = str(uuid.uuid4())
+    event = {
+        "ok": True,
+        "apply_id": apply_id,
+        "draft_id": draft.get("draft_id"),
+        "issue_key": issue_key,
+        "approved_by": approved_by,
+        "applied_at": utc_now_iso(),
+        "comment_id": str(comment.id),
+        "label": label_name or ("AIA" if is_acceptance_criteria else "AI-A"),
+        "description_updated": description_updated,
+        "duplicate": duplicate,
+        "change_summary": change_summary,
+        "source": "mattermost_task_thread",
+        "draft": draft,
+    }
+    append_apply_history(event)
+    append_execution_log({
+        "event": "task_chat_apply_draft",
+        "status": "success",
+        "issue_key": issue_key,
+        "apply_id": apply_id,
+        "draft_id": draft.get("draft_id"),
+    })
+    return event
+
+
+def poll_task_chat_threads(payload: dict | None = None) -> dict:
+    close_old_connections()
+    if not TASK_CHAT_THREAD_ENABLED and not (payload or {}).get("force"):
+        return {"ok": True, "ignored": True, "message": "Task chat threads are disabled."}
+
+    contexts = latest_contexts_by_root()
+    if not contexts:
+        return {"ok": True, "threads": 0, "replies": 0}
+
+    bot_user = mattermost_current_user()
+    bot_user_id = bot_user.get("id")
+    state = read_task_chat_state()
+    threads_state = state.setdefault("threads", {})
+    replies = 0
+    initialized = 0
+    errors = []
+
+    for root_id, context in contexts.items():
+        channel_id = context.get("channel_id")
+        if not channel_id:
+            continue
+        try:
+            posts = mattermost_thread_posts(root_id)
+        except Exception as exc:
+            thread_state = threads_state.setdefault(root_id, {"context_id": context.get("context_id"), "processed_post_ids": [root_id]})
+            thread_state["last_error"] = str(exc)
+            thread_state["last_polled_at"] = utc_now_iso()
+            errors.append({"root_id": root_id, "error": str(exc)})
+            continue
+        thread_state = threads_state.get(root_id)
+        if not thread_state:
+            threads_state[root_id] = {
+                "context_id": context.get("context_id"),
+                "processed_post_ids": sorted({post.get("id") for post in posts if post.get("id")}),
+                "initialized_at": utc_now_iso(),
+            }
+            initialized += 1
+            continue
+
+        processed = set(thread_state.get("processed_post_ids") or [])
+        processed.add(root_id)
+        for post in sorted(posts, key=lambda item: item.get("create_at") or 0):
+            post_id = post.get("id")
+            if not post_id or post_id in processed:
+                continue
+            processed.add(post_id)
+            message = str(post.get("message") or "").strip()
+            if not message or post.get("user_id") == bot_user_id:
+                continue
+            append_thread_dialogue(thread_state, "user", message, post_id)
+            live_history = task_chat_history(posts, root_id, bot_user_id)
+            saved_history = state_dialogue_history(thread_state)
+            history = "\n".join(item for item in [saved_history, live_history] if item).strip()
+            pending_draft = thread_state.get("pending_draft") if isinstance(thread_state.get("pending_draft"), dict) else None
+            if pending_draft and is_task_chat_cancel(message):
+                thread_state.pop("pending_draft", None)
+                answer = "Ок, черновик отменён. Plane не изменял."
+            elif pending_draft and is_task_chat_approval(message):
+                try:
+                    applied = apply_task_update_draft(context, pending_draft, approved_by=post.get("user_id") or "mattermost")
+                    thread_state.pop("pending_draft", None)
+                    if applied.get("description_updated"):
+                        answer = (
+                            f"Готово. Обновил `Acceptance Criteria` в описании задачи `{applied['issue_key']}`, "
+                            f"поставил метку `{applied['label']}` и оставил короткое резюме в комментарии."
+                        )
+                    elif applied.get("duplicate"):
+                        answer = (
+                            f"Готово. Похожий `Acceptance Criteria` уже был в `{applied['issue_key']}`, "
+                            f"повторно не добавлял. Метка `{applied['label']}` поставлена, резюме оставил в комментарии."
+                        )
+                    else:
+                        answer = (
+                            f"Готово. Добавил approved AI-комментарий в Plane для `{applied['issue_key']}` "
+                            f"и поставил метку `{applied['label']}`. Описание задачи не перетирал."
+                        )
+                except Exception as exc:
+                    logger.exception("Task chat draft apply failed")
+                    answer = f"Не смог применить черновик в Plane: {exc}. Черновик оставил в ожидании."
+            elif looks_like_task_update_request(message):
+                draft = build_task_update_draft(context, message, history)
+                thread_state["pending_draft"] = draft
+                answer = format_task_update_draft(draft)
+            elif pending_draft and not is_task_chat_approval(message):
+                answer = "У меня уже есть черновик изменения по этой задаче. Ответь `y` / `да`, чтобы применить, или `n` / `нет`, чтобы отменить."
+            else:
+                answer = generate_task_chat_reply(context, message, history)
+            reply = post_mattermost_channel_message(channel_id, answer, root_id=root_id)
+            if reply.get("id"):
+                processed.add(reply["id"])
+                append_thread_dialogue(thread_state, "assistant", answer, reply["id"])
+            replies += 1
+            append_execution_log({
+                "event": "task_chat_reply",
+                "status": "success",
+                "issue_key": context.get("issue_key"),
+                "context_id": context.get("context_id"),
+                "root_id": root_id,
+                "post_id": post_id,
+                "reply_id": reply.get("id"),
+            })
+
+        thread_state["processed_post_ids"] = sorted(processed)
+        thread_state["last_polled_at"] = utc_now_iso()
+
+    write_task_chat_state(state)
+    return {"ok": True, "threads": len(contexts), "initialized": initialized, "replies": replies, "errors": len(errors)}
+
+
+def task_chat_poll_loop() -> None:
+    while True:
+        try:
+            poll_task_chat_threads({})
+        except Exception as exc:
+            logger.exception("Task chat thread poll failed")
+            append_execution_log({"event": "task_chat_poll", "status": "failure", "error": str(exc)})
+        time.sleep(max(3, TASK_CHAT_POLL_SECONDS))
+
+
+def run_start_task_chat(payload: dict) -> dict:
+    close_old_connections()
+    issue = find_issue(payload)
+    issue_payload = issue_to_payload(issue)
+    issue_key = issue_payload["key"]
+    review_id = str(payload.get("review_id") or "").strip()
+    graph = build_issue_context_graph(issue)
+    if review_id:
+        graph["latest_review"] = find_review_history_item(issue_key, review_id)
+    username = str(payload.get("mattermost_username") or MATTERMOST_DEFAULT_USERNAME).strip().lstrip("@")
+    target_user = resolve_mattermost_user(username)
+    channel = create_direct_channel(target_user["id"])
+    context_id = str(uuid.uuid4())
+    message = format_task_chat_message(graph, context_id)
+    post = post_mattermost_channel_message(channel["id"], message)
+    thread_root_id = post.get("id")
+    event = {
+        "ok": True,
+        "context_id": context_id,
+        "issue_key": issue_key,
+        "issue": issue_payload,
+        "context_graph": graph,
+        "review_id": graph["latest_review"].get("review_id") if graph.get("latest_review") else None,
+        "mattermost_username": username,
+        "mattermost_user_id": target_user["id"],
+        "channel_id": channel["id"],
+        "post_id": post.get("id"),
+        "thread_root_id": thread_root_id,
+        "started_at": utc_now_iso(),
+        "mode": "task_chat_thread_mvp_1",
+    }
+    append_task_chat_context(event)
+    mark_task_chat_thread_started(thread_root_id, context_id)
+    append_execution_log({"event": "task_chat_start", "status": "success", "issue_key": issue_key, "context_id": context_id})
+    return {
+        "ok": True,
+        "status": "sent",
+        "context_id": context_id,
+        "issue_key": issue_key,
+        "mattermost_username": username,
+        "channel_id": channel["id"],
+        "post_id": post.get("id"),
+        "thread_root_id": thread_root_id,
+        "message": "Task chat started in Mattermost.",
+    }
+
+
+def normalize_finding(value: dict | None) -> dict:
+    value = value if isinstance(value, dict) else {}
+    severity = str(value.get("severity") or "medium").lower()
+    if severity not in {"low", "medium", "high"}:
+        severity = "medium"
+    return {
+        "severity": severity,
+        "title": str(value.get("title") or "AI review finding"),
+        "description": str(value.get("description") or ""),
+        "recommendation": str(value.get("recommendation") or ""),
+        "can_be_applied": bool(value.get("can_be_applied", False)),
+    }
+
+
+def normalize_agent_review(agent_name: str, raw: dict | str) -> dict:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return safe_agent_fallback(agent_name, f"Agent returned invalid JSON: {raw[:500]}")
+    if not isinstance(raw, dict):
+        return safe_agent_fallback(agent_name, "Agent returned a non-object response.")
+
+    status = str(raw.get("status") or "yellow").lower()
+    if status not in {"green", "yellow", "red"}:
+        status = "yellow"
+    findings = [normalize_finding(item) for item in raw.get("findings") or [] if isinstance(item, dict)]
+    patch = raw.get("proposed_task_patch") if isinstance(raw.get("proposed_task_patch"), dict) else {}
+    normalized_patch = default_patch()
+    normalized_patch.update({key: patch.get(key, normalized_patch[key]) for key in normalized_patch})
+    return {
+        "agent_name": str(raw.get("agent_name") or agent_name),
+        "status": status,
+        "summary": str(raw.get("summary") or "AI review completed."),
+        "findings": findings,
+        "proposed_task_patch": normalized_patch,
+    }
+
+
+def safe_agent_fallback(agent_name: str, reason: str) -> dict:
+    return {
+        "agent_name": agent_name,
+        "status": "yellow",
+        "summary": "Agent review could not be parsed safely.",
+        "findings": [
+            {
+                "severity": "medium",
+                "title": "Invalid agent response",
+                "description": reason,
+                "recommendation": "Review the task manually or rerun AI analysis.",
+                "can_be_applied": False,
+            }
+        ],
+        "proposed_task_patch": default_patch(),
+    }
+
+
+def strip_code_fence(content: str) -> str:
+    content = content.strip()
+    if content.startswith("```"):
+        content = re.sub(r"^```(?:json)?", "", content).strip()
+        content = re.sub(r"```$", "", content).strip()
+    return content
+
+
+def review_agent(agent_name: str, issue_type: str, issue: dict, context: str) -> dict:
+    prompt = f"""
+You are {agent_name} reviewing a Plane task for AIGILE.
+Task type: {issue_type}
+
+Plane Pages Project Knowledge is strict. If it contains agent rules, templates, or review criteria,
+you must follow them over generic assumptions.
+
+Return STRICT JSON only with this shape:
+{{
+  "agent_name": "{agent_name}",
+  "status": "green | yellow | red",
+  "summary": "short Russian summary",
+  "findings": [
+    {{
+      "severity": "low | medium | high",
+      "title": "finding title",
+      "description": "problem description",
+      "recommendation": "what should be changed",
+      "can_be_applied": true
+    }}
+  ],
+  "proposed_task_patch": {{
+    "title": "",
+    "description": "",
+    "acceptance_criteria": [],
+    "test_cases": [],
+    "risks": [],
+    "dependencies": []
+  }}
+}}
+
+Status rules:
+- green: no required changes for your role.
+- yellow: useful improvements, but task can proceed.
+- red: blocker, contradiction, missing critical info, or serious risk.
+
+Local knowledge context:
+{context[:8000]}
+
+Issue:
+{json.dumps(issue, ensure_ascii=False, indent=2)}
+""".strip()
+    raw = ollama_chat_completion(
+        [
+            {"role": "system", "content": "Return strict JSON only. No markdown. No cloud APIs."},
+            {"role": "user", "content": prompt},
+        ],
+        {"temperature": 0.1},
+    )
+    content = strip_code_fence(raw.get("message", {}).get("content", "{}"))
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        return safe_agent_fallback(agent_name, content[:1000])
+    return normalize_agent_review(agent_name, parsed)
+
+
+def run_review_gate(payload: dict) -> dict:
+    if not REVIEW_GATE_ENABLED:
+        return {"ok": False, "disabled": True, "error": "AI Review Gate is disabled"}
+
+    close_old_connections()
+    issue = find_issue(payload)
+    issue_payload = issue_to_payload(issue)
+    issue_key = issue_payload["key"]
+    if not has_type_label(issue_payload):
+        append_execution_log({"event": "ai_review_gate", "status": "blocked", "issue_key": issue_key, "reason": "missing_type_label"})
+        return {
+            "ok": False,
+            "blocked": True,
+            "code": "missing_type_label",
+            "issue_key": issue_key,
+            "title": "Анализ заблокирован",
+            "message": TYPE_LABEL_ERROR,
+            "error": TYPE_LABEL_ERROR,
+            "required_labels": TYPE_LABEL_NAMES,
+        }
+    detected_type = detect_issue_type(issue_payload)
+    agent_names = agents_for_issue_type(detected_type)
+    context = build_review_context(issue_payload, detected_type, agent_names)
+    agents = [review_agent(agent_name, detected_type, issue_payload, context) for agent_name in agent_names]
+    gate_review = deterministic_gate_review(detected_type, issue_payload)
+    if gate_review:
+        agents.insert(0, gate_review)
+    review = {
+        "ok": True,
+        "review_id": str(uuid.uuid4()),
+        "issue_id": issue_payload["id"],
+        "issue_key": issue_key,
+        "detected_type": detected_type,
+        "overall_status": overall_review_status(agents),
+        "created_at": utc_now_iso(),
+        "model": OLLAMA_MODEL,
+        "agents": agents,
+    }
+    append_review_history(review)
+    mark_issue_with_ai_label(issue, "reviewed")
+    append_execution_log({"event": "ai_review_gate", "status": "success", "issue_key": issue_key, "review_id": review["review_id"]})
+    return review
+
+
+def format_mattermost_message(issue: dict, analysis: dict) -> str:
+    title = issue["title"]
+    key = issue["key"]
+    preview = analysis.get("preview_summary") or "AI-анализ готов."
+    status = analysis.get("status") or "ready"
+    risks = "\n".join(f"- {item}" for item in as_list(analysis.get("risks"))) or "- No major risks identified"
+    deps = "\n".join(f"- {item}" for item in as_list(analysis.get("dependencies"))) or "- No explicit dependencies"
+    ac = "\n".join(f"- {item}" for item in as_list(analysis.get("acceptance_criteria"))) or "- Acceptance criteria need clarification"
+    plan = "\n".join(f"- {item}" for item in as_list(analysis.get("implementation_plan"))) or "- Implementation plan needs clarification"
+    full = analysis.get("full_analysis") or preview
+    codex_prompt = analysis.get("codex_prompt") or f"Implement Plane issue {key}: {title}"
+    return f"""**AI анализ задачи готов:** `{key}` {title}
+
+Кратко: {preview}
+
+Status: `{status}`
+
+<details>
+<summary>Показать полный AI-анализ</summary>
+
+## Полный анализ
+
+{full}
+
+## Risks
+{risks}
+
+## Dependencies
+{deps}
+
+## Acceptance criteria
+{ac}
+
+## Suggested implementation plan
+{plan}
+
+## Codex-ready prompt
+
+```text
+{codex_prompt}
+```
+
+</details>"""
+
+
+def post_to_mattermost(text: str) -> None:
+    body = {"username": "AI Delivery Assistant", "text": text}
+    req = Request(
+        MATTERMOST_WEBHOOK_URL,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(req, timeout=30) as response:
+        if response.status >= 300:
+            raise RuntimeError(f"Mattermost returned HTTP {response.status}")
+
+
+def run_manual_trigger(payload: dict) -> dict:
+    close_old_connections()
+    issue = find_issue(payload)
+    issue_key = f"{issue.project.identifier}-{issue.sequence_id}"
+
+    with IN_FLIGHT_LOCK:
+        if issue_key in IN_FLIGHT:
+            return {"ok": True, "status": "already_running", "issue_key": issue_key}
+        IN_FLIGHT.add(issue_key)
+
+    try:
+        issue_payload = issue_to_payload(issue)
+        context = read_knowledge_base()
+        analysis = ollama_chat(issue_payload, context)
+        message = format_mattermost_message(issue_payload, analysis)
+        post_to_mattermost(message)
+        append_execution_log({"event": "manual_trigger", "status": "success", "issue_key": issue_key})
+        return {
+            "ok": True,
+            "status": "sent",
+            "issue_key": issue_key,
+            "preview_summary": analysis.get("preview_summary"),
+        }
+    except Exception as exc:
+        append_execution_log({"event": "manual_trigger", "status": "failure", "issue_key": issue_key, "error": str(exc)})
+        raise
+    finally:
+        with IN_FLIGHT_LOCK:
+            IN_FLIGHT.discard(issue_key)
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_OPTIONS(self) -> None:
+        json_response(self, 204, {})
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/health":
+            json_response(self, 200, {"ok": True})
+            return
+        if parsed.path == "/api/resolve-issue":
+            try:
+                payload = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+                issue = find_issue(payload)
+                json_response(self, 200, {"ok": True, "issue": issue_to_payload(issue)})
+            except Exception as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/api/review-history":
+            params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+            issue_key = params.get("issue_key")
+            limit = int(params.get("limit") or 20)
+            json_response(self, 200, {"ok": True, "reviews": read_review_history(issue_key, limit)})
+            return
+        json_response(self, 404, {"ok": False, "error": "Not found"})
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/manual-trigger":
+            try:
+                payload = read_body(self)
+                result = run_manual_trigger(payload)
+                json_response(self, 200, result)
+            except ValueError as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                logger.exception("Manual trigger failed")
+                json_response(self, 500, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/api/review-task":
+            try:
+                payload = read_body(self)
+                result = run_review_gate(payload)
+                json_response(self, 200 if result.get("ok") else 400, result)
+            except ValueError as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                logger.exception("AI review gate failed")
+                json_response(self, 500, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/api/apply-review-suggestion":
+            try:
+                payload = read_body(self)
+                result = run_apply_review_suggestion(payload)
+                json_response(self, 200 if result.get("ok") else 400, result)
+            except ValueError as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                logger.exception("AI review suggestion apply failed")
+                json_response(self, 500, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/api/start-task-chat":
+            try:
+                payload = read_body(self)
+                result = run_start_task_chat(payload)
+                json_response(self, 200 if result.get("ok") else 400, result)
+            except ValueError as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                logger.exception("Task chat start failed")
+                json_response(self, 500, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/api/task-chat/poll":
+            try:
+                payload = read_body(self)
+                result = poll_task_chat_threads(payload)
+                json_response(self, 200 if result.get("ok") else 400, result)
+            except Exception as exc:
+                logger.exception("Task chat poll failed")
+                json_response(self, 500, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/api/refresh-knowledge-base":
+            try:
+                path = refresh_knowledge_base()
+                json_response(self, 200, {"ok": True, "path": path})
+            except Exception as exc:
+                logger.exception("Manual KB refresh failed")
+                json_response(self, 500, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/api/sync-plane-pages":
+            try:
+                payload = read_body(self)
+                result = sync_plane_pages_to_rag(payload)
+                json_response(self, 200 if result.get("ok") else 400, result)
+            except Exception as exc:
+                logger.exception("Plane Pages sync failed")
+                json_response(self, 500, {"ok": False, "error": str(exc)})
+            return
+        json_response(self, 404, {"ok": False, "error": "Not found"})
+
+    def log_message(self, fmt: str, *args) -> None:
+        logger.info("%s - %s", self.address_string(), fmt % args)
+
+
+if __name__ == "__main__":
+    ensure_dirs()
+    refresh_knowledge_base()
+    threading.Thread(target=scheduler_loop, daemon=True).start()
+    threading.Thread(target=task_chat_poll_loop, daemon=True).start()
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    logger.info("AIGILE backend listening on 0.0.0.0:%s", PORT)
+    server.serve_forever()

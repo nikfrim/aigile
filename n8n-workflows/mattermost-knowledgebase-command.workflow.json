@@ -1,0 +1,201 @@
+{
+    "id":  "mattermost-knowledgebase-command",
+    "name":  "Mattermost Knowledgebase Command",
+    "nodes":  [
+                  {
+                      "parameters":  {
+                                         "httpMethod":  "POST",
+                                         "path":  "mattermost-knowledgebase",
+                                         "responseMode":  "responseNode",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "1d83d57a-6ac6-4695-bf17-31a51f7f1d2f",
+                      "name":  "Knowledgebase Command Webhook",
+                      "type":  "n8n-nodes-base.webhook",
+                      "typeVersion":  2,
+                      "position":  [
+                                       -700,
+                                       0
+                                   ],
+                      "webhookId":  "mattermost-knowledgebase"
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const body = $json.body || $json;\nconst query = (body.text || body.query || \u0027\u0027).trim();\nif (!query) {\n  return [{ json: { ok: false, empty: true, mattermost_payload: { response_type: \u0027ephemeral\u0027, text: \u0027Напиши запрос после команды. Например: /kb что такое Agile?\\n\\nРежимы: /kb --short вопрос, /kb --deep вопрос, /kb --reset\u0027 } } }];\n}\nreturn [{ json: {\n  ok: true,\n  collection: \u0027knowledgebase\u0027,\n  query,\n  channel_id: body.channel_id || \u0027\u0027,\n  channel_name: body.channel_name || \u0027\u0027,\n  user_id: body.user_id || \u0027\u0027,\n  user_name: body.user_name || \u0027\u0027,\n  response_url: body.response_url || \u0027\u0027\n} }];"
+                                     },
+                      "id":  "645d4933-f822-403f-983a-89951d8854ac",
+                      "name":  "Build Query",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       -460,
+                                       0
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "conditions":  {
+                                                            "boolean":  [
+                                                                            {
+                                                                                "value1":  "={{ $json.ok }}",
+                                                                                "value2":  true
+                                                                            }
+                                                                        ]
+                                                        }
+                                     },
+                      "id":  "82015eb0-706e-4e07-89ee-93f93cb17497",
+                      "name":  "Has Query?",
+                      "type":  "n8n-nodes-base.if",
+                      "typeVersion":  1,
+                      "position":  [
+                                       -220,
+                                       0
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "method":  "POST",
+                                         "url":  "={{ ($env.RAG_BACKEND_URL || \u0027http://rag-backend:8092\u0027) + \u0027/rag/answer\u0027 }}",
+                                         "sendBody":  true,
+                                         "specifyBody":  "json",
+                                         "jsonBody":  "={{ JSON.stringify({ collection: $json.collection, query: $json.query, limit: 5, channel_id: $json.channel_id, channel_name: $json.channel_name, user_id: $json.user_id, user_name: $json.user_name }) }}",
+                                         "options":  {
+                                                         "timeout":  240000
+                                                     }
+                                     },
+                      "id":  "592703a8-a678-4543-a07c-6d3cb0e69b11",
+                      "name":  "Ask Knowledgebase",
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "typeVersion":  4.2,
+                      "position":  [
+                                       20,
+                                       -100
+                                   ],
+                      "continueOnFail":  true
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "if ($json.mattermost_payload) return [{ json: $json.mattermost_payload }];\nreturn [{ json: { response_type: \u0027ephemeral\u0027, text: \u0027Не удалось получить ответ из локальной базы знаний. Попробуй позже.\u0027 } }];"
+                                     },
+                      "id":  "1871e935-93fb-4f5c-93c4-147f2774fac4",
+                      "name":  "Build Safe Response",
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       260,
+                                       -100
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "respondWith":  "json",
+                                         "responseBody":  "={{ $json }}",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "f29e7f85-5f42-4591-8d30-250c6d3701a6",
+                      "name":  "Respond Answer",
+                      "type":  "n8n-nodes-base.respondToWebhook",
+                      "typeVersion":  1.1,
+                      "position":  [
+                                       500,
+                                       -100
+                                   ]
+                  },
+                  {
+                      "parameters":  {
+                                         "respondWith":  "json",
+                                         "responseBody":  "={{ $json.mattermost_payload }}",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "id":  "bb9778a4-1d12-46aa-8729-1923df1644fd",
+                      "name":  "Respond Empty",
+                      "type":  "n8n-nodes-base.respondToWebhook",
+                      "typeVersion":  1.1,
+                      "position":  [
+                                       20,
+                                       140
+                                   ]
+                  }
+              ],
+    "connections":  {
+                        "Knowledgebase Command Webhook":  {
+                                                              "main":  [
+                                                                           [
+                                                                               {
+                                                                                   "node":  "Build Query",
+                                                                                   "type":  "main",
+                                                                                   "index":  0
+                                                                               }
+                                                                           ]
+                                                                       ]
+                                                          },
+                        "Build Query":  {
+                                            "main":  [
+                                                         [
+                                                             {
+                                                                 "node":  "Has Query?",
+                                                                 "type":  "main",
+                                                                 "index":  0
+                                                             }
+                                                         ]
+                                                     ]
+                                        },
+                        "Has Query?":  {
+                                           "main":  [
+                                                        [
+                                                            {
+                                                                "node":  "Ask Knowledgebase",
+                                                                "type":  "main",
+                                                                "index":  0
+                                                            }
+                                                        ],
+                                                        [
+                                                            {
+                                                                "node":  "Respond Empty",
+                                                                "type":  "main",
+                                                                "index":  0
+                                                            }
+                                                        ]
+                                                    ]
+                                       },
+                        "Ask Knowledgebase":  {
+                                                  "main":  [
+                                                               [
+                                                                   {
+                                                                       "node":  "Build Safe Response",
+                                                                       "type":  "main",
+                                                                       "index":  0
+                                                                   }
+                                                               ]
+                                                           ]
+                                              },
+                        "Build Safe Response":  {
+                                                    "main":  [
+                                                                 [
+                                                                     {
+                                                                         "node":  "Respond Answer",
+                                                                         "type":  "main",
+                                                                         "index":  0
+                                                                     }
+                                                                 ]
+                                                             ]
+                                                }
+                    },
+    "settings":  {
+                     "executionOrder":  "v1"
+                 },
+    "staticData":  null,
+    "pinData":  {
+
+                },
+    "active":  false,
+    "tags":  [
+
+             ]
+}

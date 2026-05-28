@@ -1,0 +1,167 @@
+{
+  "id": "mattermost-rag-channel-ingest",
+  "name": "Mattermost RAG Channel Ingest",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "mattermost-rag-ingest",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "19bf7dd8-ea36-4a35-9691-9a2039797df2",
+      "name": "Mattermost Ingest Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -920,
+        0
+      ],
+      "webhookId": "mattermost-rag-ingest"
+    },
+    {
+      "parameters": {
+        "jsCode": "const enabled = (($env.MATTERMOST_RAG_INGEST_ENABLED || 'false').toLowerCase() === 'true');\nif (!enabled) {\n  return [{ json: { allowed: false, reason: 'Mattermost RAG ingest is disabled.' } }];\n}\n\nconst body = $json.body || $json;\nconst rawConfig = $env.MATTERMOST_RAG_CHANNELS_JSON || '{}';\nlet config;\ntry {\n  config = JSON.parse(rawConfig);\n} catch (error) {\n  return [{ json: { allowed: false, reason: 'Mattermost RAG channel config is invalid.' } }];\n}\n\nconst channels = config.channels || config;\nconst channelId = body.channel_id || body.channelId || body.channel?.id || '';\nconst mapping = channels[channelId];\nif (!mapping || !mapping.collection) {\n  return [{ json: { allowed: false, reason: 'Channel is not allowed for RAG ingest.', channel_id: channelId } }];\n}\n\nconst text = (body.text || body.message || body.post?.message || '').trim();\nconst files = body.files || body.file_infos || body.post?.metadata?.files || [];\nreturn [{\n  json: {\n    allowed: true,\n    collection: mapping.collection,\n    channel_id: channelId,\n    channel_name: mapping.channel_name || body.channel_name || '',\n    user_name: body.user_name || body.username || body.user?.username || 'mattermost',\n    post_id: body.post_id || body.post?.id || '',\n    text,\n    files\n  }\n}];"
+      },
+      "id": "75932f5f-1500-4185-8e63-46c4f95c8d65",
+      "name": "Validate Channel",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -680,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.allowed }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "c159d2fc-f0cf-42d6-8fdf-6878c58dfeff",
+      "name": "Allowed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.RAG_BACKEND_URL || 'http://rag-backend:8092') + '/rag/ingest-text' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ collection: $json.collection, text: $json.text, title: 'Mattermost message', post_id: $json.post_id, metadata: { source_type: 'mattermost_text', author: $json.user_name, mattermost_channel_id: $json.channel_id, mattermost_channel_name: $json.channel_name, mattermost_post_id: $json.post_id } }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "febace83-74df-4dd6-b9b8-664ea9fe5d13",
+      "name": "Ingest Text",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -200,
+        -120
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.ok === false ? { ok: false, message: 'RAG ingest failed or no text was extracted.' } : { ok: true, message: 'Knowledge accepted for RAG ingest.' } }}",
+        "options": {}
+      },
+      "id": "5751cf4e-7d5f-4d83-96e6-bf3eae0941be",
+      "name": "Respond Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        40,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, ignored: true, message: $json.reason || 'Channel ignored.' } }}",
+        "options": {}
+      },
+      "id": "e25f4d81-6fdb-479c-84be-6a12bb0284c1",
+      "name": "Respond Ignored",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        -200,
+        140
+      ]
+    }
+  ],
+  "connections": {
+    "Mattermost Ingest Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Channel": {
+      "main": [
+        [
+          {
+            "node": "Allowed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Allowed?": {
+      "main": [
+        [
+          {
+            "node": "Ingest Text",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Ignored",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ingest Text": {
+      "main": [
+        [
+          {
+            "node": "Respond Accepted",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "pinData": {},
+  "active": false,
+  "tags": []
+}

@@ -1,0 +1,29 @@
+{
+  "enabled": true,
+  "channels": {
+    "REPLACE_WITH_KNOWLEDGE_BOOKS_CHANNEL_ID": {
+      "channel_name": "knowledge-books",
+      "collection": "knowledge_books"
+    },
+    "REPLACE_WITH_PROJECT_DOCS_CHANNEL_ID": {
+      "channel_name": "project-docs",
+      "collection": "project_docs"
+    },
+    "REPLACE_WITH_TECHNICAL_DOCS_CHANNEL_ID": {
+      "channel_name": "tech-docs",
+      "collection": "technical_docs"
+    },
+    "REPLACE_WITH_TEAM_CONTEXT_CHANNEL_ID": {
+      "channel_name": "team-context",
+      "collection": "team_context"
+    },
+    "REPLACE_WITH_DECISION_LOG_CHANNEL_ID": {
+      "channel_name": "decision-log",
+      "collection": "decision_log"
+    },
+    "REPLACE_WITH_PROMPT_REGISTRY_CHANNEL_ID": {
+      "channel_name": "prompt-registry",
+      "collection": "prompt_registry"
+    }
+  }
+}

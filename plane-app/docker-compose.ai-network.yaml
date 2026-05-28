@@ -1,0 +1,77 @@
+services:
+  web:
+    volumes:
+      - ./patches/index.html:/usr/share/nginx/html/index.html:ro
+      - ./patches/aigile-manual-trigger.js:/usr/share/nginx/html/aigile-manual-trigger.js:ro
+      - ./patches/entry.client-CVNu3yq9.aigile.js:/usr/share/nginx/html/assets/entry.client-CVNu3yq9.aigile.js:ro
+      - ./patches/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - default
+      - ai-delivery-net
+  space:
+    networks:
+      - default
+      - ai-delivery-net
+  admin:
+    networks:
+      - default
+      - ai-delivery-net
+  live:
+    networks:
+      - default
+      - ai-delivery-net
+  api:
+    environment:
+      PLANE_ISSUE_CREATED_WEBHOOK_DELAY_SECONDS: ${PLANE_ISSUE_CREATED_WEBHOOK_DELAY_SECONDS:-600}
+    volumes:
+      - ./patches/webhook_task.py:/code/plane/bgtasks/webhook_task.py:ro
+    networks:
+      - default
+      - ai-delivery-net
+  worker:
+    environment:
+      PLANE_ISSUE_CREATED_WEBHOOK_DELAY_SECONDS: ${PLANE_ISSUE_CREATED_WEBHOOK_DELAY_SECONDS:-600}
+    volumes:
+      - ./patches/webhook_task.py:/code/plane/bgtasks/webhook_task.py:ro
+    networks:
+      - default
+      - ai-delivery-net
+  beat-worker:
+    environment:
+      PLANE_ISSUE_CREATED_WEBHOOK_DELAY_SECONDS: ${PLANE_ISSUE_CREATED_WEBHOOK_DELAY_SECONDS:-600}
+    volumes:
+      - ./patches/webhook_task.py:/code/plane/bgtasks/webhook_task.py:ro
+    networks:
+      - default
+      - ai-delivery-net
+  migrator:
+    networks:
+      - default
+      - ai-delivery-net
+  plane-db:
+    networks:
+      - default
+      - ai-delivery-net
+  plane-redis:
+    networks:
+      - default
+      - ai-delivery-net
+  plane-mq:
+    networks:
+      - default
+      - ai-delivery-net
+  plane-minio:
+    networks:
+      - default
+      - ai-delivery-net
+  proxy:
+    networks:
+      ai-delivery-net:
+        aliases:
+          - plane-proxy
+      default:
+
+networks:
+  ai-delivery-net:
+    name: ai-delivery-net
+    external: true

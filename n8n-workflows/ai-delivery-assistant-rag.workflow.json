@@ -1,0 +1,142 @@
+{
+  "id": "ai-delivery-assistant-rag",
+  "name": "AI Delivery Assistant RAG",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "plane-ai-delivery-rag",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "f8c27d1e-2da8-441e-8b7a-41b9f5894e70",
+      "name": "Plane Webhook RAG",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -740,
+        0
+      ],
+      "webhookId": "plane-ai-delivery-rag"
+    },
+    {
+      "parameters": {
+        "jsCode": "const expected = $env.N8N_WEBHOOK_TOKEN || '';\nconst token = $json.query?.token || $json.headers?.['x-ai-delivery-token'] || $json.headers?.['X-AI-Delivery-Token'] || '';\nif (expected && token !== expected) {\n  throw new Error('Invalid webhook token');\n}\nreturn [{ json: { body: $json.body || $json } }];"
+      },
+      "id": "f8d84f8e-066a-4f27-a8e2-a7719a936dab",
+      "name": "Validate Token",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -500,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.RAG_BACKEND_URL || 'http://rag-backend:8092') + '/rag/analyze-issue' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 240000
+        }
+      },
+      "id": "e8ed4f6f-f187-42c4-8c39-16d744561c7d",
+      "name": "Analyze Issue With RAG",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -260,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MATTERMOST_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.mattermost_payload || { username: 'AI Delivery Assistant', text: 'RAG analysis completed but payload was empty.' }) }}",
+        "options": {}
+      },
+      "id": "b721e392-b8dd-4390-9902-ea6c066af166",
+      "name": "Post to Mattermost",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -20,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, message: 'AI Delivery Assistant RAG processed the Plane event.' } }}",
+        "options": {}
+      },
+      "id": "d4ec2157-4b04-489f-8e98-6a5fc75cf49e",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        220,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Plane Webhook RAG": {
+      "main": [
+        [
+          {
+            "node": "Validate Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Token": {
+      "main": [
+        [
+          {
+            "node": "Analyze Issue With RAG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Issue With RAG": {
+      "main": [
+        [
+          {
+            "node": "Post to Mattermost",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post to Mattermost": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "pinData": {},
+  "active": false,
+  "tags": []
+}

@@ -1,0 +1,24 @@
+# Local secrets and credentials
+.env
+*.env
+plane.env
+.n8n-cookies.txt
+
+# Local Docker / app runtime state
+.docker-config/
+.n8n-db-copy/
+**/logs/
+**/rag-data/.state/
+**/knowledge-base/latest.md
+
+# Python/runtime cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+

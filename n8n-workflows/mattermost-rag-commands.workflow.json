@@ -1,0 +1,137 @@
+{
+  "id": "mattermost-rag-commands",
+  "name": "Mattermost RAG Commands",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "mattermost-rag-command",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "f7ddc4f4-c4e6-4d05-9a7d-d8f296a40545",
+      "name": "Mattermost Command Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -720,
+        0
+      ],
+      "webhookId": "mattermost-rag-command"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body || $json;\nconst command = (body.command || '').replace(/^\\//, '').trim();\nconst text = (body.text || body.query || '').trim();\nconst map = {\n  knowledge: 'knowledge_books',\n  project: 'plane_pages',\n  pages: 'plane_pages',\n  tech: 'technical_docs',\n  team: 'team_context',\n  decision: 'decision_log',\n};\nconst collection = map[command] || 'knowledge_books';\nreturn [{ json: { command, collection, query: text || body.text || 'AIGILE context', limit: 5 } }];"
+      },
+      "id": "3b4147ce-cd23-4306-95e7-2783e50732a6",
+      "name": "Route Command",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -480,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.RAG_BACKEND_URL || 'http://rag-backend:8092') + '/rag/query' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ collection: $json.collection, query: $json.query, limit: $json.limit }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "e6c434c2-41ab-4741-bba7-63e8609209d5",
+      "name": "Query RAG",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const matches = $json.matches || [];\nconst lines = matches.slice(0, 5).map((match, index) => `${index + 1}. ${match.title || 'Untitled'} (${match.collection}, score ${Number(match.score || 0).toFixed(3)})\\n${(match.text || '').slice(0, 500)}`).join('\\n\\n');\nconst text = lines || 'Ничего не найдено в локальной базе знаний.';\nreturn [{ json: { response_type: 'ephemeral', text } }];"
+      },
+      "id": "a75af8dd-995b-4c62-8f9f-dfc9d78bdbfd",
+      "name": "Build Command Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "a9d2d029-06e6-4cfd-a822-347b91f278e2",
+      "name": "Respond to Mattermost",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Mattermost Command Webhook": {
+      "main": [
+        [
+          {
+            "node": "Route Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Command": {
+      "main": [
+        [
+          {
+            "node": "Query RAG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query RAG": {
+      "main": [
+        [
+          {
+            "node": "Build Command Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Command Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Mattermost",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "pinData": {},
+  "active": false,
+  "tags": []
+}

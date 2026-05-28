@@ -1,0 +1,53 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  mattermost:
+    image: ${MATTERMOST_IMAGE}:${MATTERMOST_IMAGE_TAG}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${MATTERMOST_PORT}:8065"
+    environment:
+      TZ: Europe/Moscow
+      MM_SERVICESETTINGS_SITEURL: ${MM_SERVICESETTINGS_SITEURL}
+      MM_SERVICESETTINGS_LISTENADDRESS: :8065
+      MM_SERVICESETTINGS_ALLOWEDUNTRUSTEDINTERNALCONNECTIONS: ${MM_SERVICESETTINGS_ALLOWEDUNTRUSTEDINTERNALCONNECTIONS}
+      MM_PLUGINSETTINGS_ENABLE: ${MM_PLUGINSETTINGS_ENABLE}
+      MM_PLUGINSETTINGS_ENABLEUPLOADS: ${MM_PLUGINSETTINGS_ENABLEUPLOADS}
+      MM_SERVICESETTINGS_ENABLEINCOMINGWEBHOOKS: ${MM_SERVICESETTINGS_ENABLEINCOMINGWEBHOOKS}
+      MM_SERVICESETTINGS_ENABLEPOSTUSERNAMEOVERRIDE: ${MM_SERVICESETTINGS_ENABLEPOSTUSERNAMEOVERRIDE}
+      MM_SERVICESETTINGS_ENABLEPOSTICONOVERRIDE: ${MM_SERVICESETTINGS_ENABLEPOSTICONOVERRIDE}
+      MM_SERVICESETTINGS_ENABLEUSERACCESSTOKENS: ${MM_SERVICESETTINGS_ENABLEUSERACCESSTOKENS}
+      MM_SQLSETTINGS_DRIVERNAME: postgres
+      MM_SQLSETTINGS_DATASOURCE: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable&connect_timeout=10
+    volumes:
+      - mattermost-config:/mattermost/config
+      - mattermost-data:/mattermost/data
+      - mattermost-logs:/mattermost/logs
+      - mattermost-plugins:/mattermost/plugins
+      - mattermost-client-plugins:/mattermost/client/plugins
+      - mattermost-bleve-indexes:/mattermost/bleve-indexes
+
+volumes:
+  postgres-data:
+  mattermost-config:
+  mattermost-data:
+  mattermost-logs:
+  mattermost-plugins:
+  mattermost-client-plugins:
+  mattermost-bleve-indexes:

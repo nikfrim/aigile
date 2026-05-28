@@ -1,0 +1,16 @@
+services:
+  mattermost:
+    networks:
+      ai-delivery-net:
+        aliases:
+          - mattermost
+      default:
+  postgres:
+    networks:
+      - default
+      - ai-delivery-net
+
+networks:
+  ai-delivery-net:
+    name: ai-delivery-net
+    external: true

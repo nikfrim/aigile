@@ -1,0 +1,170 @@
+{
+  "id": "ai-delivery-assistant",
+  "name": "AI Delivery Assistant",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "plane-ai-delivery",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "a2d0d1d5-73a4-44c0-82df-0ad0c62344d5",
+      "name": "Plane Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -760,
+        0
+      ],
+      "webhookId": "plane-ai-delivery"
+    },
+    {
+      "parameters": {
+        "jsCode": "const expected = 'HZLRkEMbs3JHHWgqoy25qZvHez3NP7qK';\nconst token = $json.query?.token || $json.headers?.['x-ai-delivery-token'] || $json.headers?.['X-AI-Delivery-Token'] || '';\nif (expected && token !== expected) {\n  throw new Error('Invalid webhook token');\n}\n\nconst body = $json.body || $json;\nconst issue = body.issue || body.data || body;\nconst title = issue.name || issue.title || issue.issue?.name || 'Untitled Plane item';\nconst description = issue.description_stripped || issue.description || issue.description_html || issue.issue?.description || '';\nconst priority = issue.priority || issue.issue?.priority || 'unknown';\nconst state = issue.state_detail?.name || issue.state || issue.issue?.state || 'unknown';\nconst project = issue.project_detail?.name || issue.project || body.project?.name || 'unknown';\nconst url = issue.url || issue.issue_url || body.url || '';\n\nconst prompt = `You are AI Delivery Assistant. Analyze this new Plane work item. Return concise Russian output with sections: Summary, Risk Level (Low/Medium/High), Blockers, Recommendations.\\n\\nProject: ${project}\\nTitle: ${title}\\nPriority: ${priority}\\nState: ${state}\\nURL: ${url}\\nDescription:\\n${description}`;\n\nreturn [{ json: { body, issue, title, project, url, prompt } }];"
+      },
+      "id": "e332c8e3-8880-48dc-91a4-41d21df4dace",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -520,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://ollama:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'qwen2.5-coder:7b-instruct', stream: false, messages: [{ role: 'system', content: 'You are a local self-hosted AI delivery assistant. Do not call cloud APIs. Be concise and practical.' }, { role: 'user', content: $json.prompt }] }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "d701a2ed-0448-46cc-b7bc-e48f46b31daa",
+      "name": "Ask Ollama",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -280,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const source = $items('Build Prompt')[0].json;\nconst answer = $json.message?.content || $json.response || JSON.stringify($json);\nconst title = source.title || 'Plane item';\nconst project = source.project || 'unknown';\nconst url = source.url ? `\\n${source.url}` : '';\nconst text = `### AI Delivery Assistant\\n**Project:** ${project}\\n**Item:** ${title}${url}\\n\\n${answer}`;\nreturn [{ json: { text } }];"
+      },
+      "id": "8d07495d-0c68-40b4-bdec-a065a590b8e4",
+      "name": "Build Mattermost Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://mattermost:8065/hooks/dyshmsa547n93nym7bg34jrsfr",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ username: 'AI Delivery Assistant', text: $json.text }) }}",
+        "options": {}
+      },
+      "id": "f10dd3e5-11d7-4a53-bae8-0127e3934a92",
+      "name": "Post to Mattermost",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, message: 'AI Delivery Assistant processed the Plane event.' } }}",
+        "options": {}
+      },
+      "id": "ab3728e1-e28a-4376-91a4-8e3868f10d23",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        440,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Plane Webhook": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "Ask Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask Ollama": {
+      "main": [
+        [
+          {
+            "node": "Build Mattermost Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Mattermost Message": {
+      "main": [
+        [
+          {
+            "node": "Post to Mattermost",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post to Mattermost": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "pinData": {},
+  "active": false,
+  "versionId": "9a4d0055-5a56-4e1f-a64e-6d2847483d5d",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

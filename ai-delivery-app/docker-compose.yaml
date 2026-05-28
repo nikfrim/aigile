@@ -1,0 +1,194 @@
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    restart: unless-stopped
+    ports:
+      - "${N8N_PORT}:5678"
+    environment:
+      TZ: Europe/Moscow
+      GENERIC_TIMEZONE: Europe/Moscow
+      N8N_HOST: ${N8N_HOST}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: ${N8N_PROTOCOL}
+      N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL}
+      WEBHOOK_URL: ${WEBHOOK_URL}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      N8N_TEMPLATES_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      N8N_HIRING_BANNER_ENABLED: "false"
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      MATTERMOST_INTERNAL_URL: ${MATTERMOST_INTERNAL_URL}
+      PLANE_INTERNAL_URL: ${PLANE_INTERNAL_URL}
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL}
+      N8N_WEBHOOK_TOKEN: ${N8N_WEBHOOK_TOKEN}
+      RAG_BACKEND_URL: http://rag-backend:8092
+      MATTERMOST_WEBHOOK_URL: ${MATTERMOST_WEBHOOK_URL}
+      MATTERMOST_RAG_INGEST_ENABLED: ${MATTERMOST_RAG_INGEST_ENABLED:-false}
+      MATTERMOST_RAG_CHANNELS_JSON: ${MATTERMOST_RAG_CHANNELS_JSON:-{}}
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - ../n8n-workflows:/workflows:ro
+    depends_on:
+      - ollama
+    networks:
+      ai-delivery-net:
+        aliases:
+          - n8n
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT}:11434"
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_KEEP_ALIVE: 24h
+      OLLAMA_NO_CLOUD: "true"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    gpus: all
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      ai-delivery-net:
+        aliases:
+          - ollama
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    restart: unless-stopped
+    ports:
+      - "${OPEN_WEBUI_PORT}:8080"
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      WEBUI_SECRET_KEY: ${OPEN_WEBUI_SECRET_KEY}
+      ENABLE_SIGNUP: "true"
+      SCARF_NO_ANALYTICS: "true"
+      DO_NOT_TRACK: "true"
+      ANONYMIZED_TELEMETRY: "false"
+    volumes:
+      - open-webui-data:/app/backend/data
+    depends_on:
+      - ollama
+    networks:
+      ai-delivery-net:
+        aliases:
+          - open-webui
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_PORT}:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      ai-delivery-net:
+        aliases:
+          - qdrant
+
+  rag-backend:
+    image: python:3.12-slim
+    restart: unless-stopped
+    working_dir: /app
+    command: sh -c "pip install --no-cache-dir pypdf >/tmp/rag-pip.log 2>&1 || true; python /app/rag_backend.py"
+    ports:
+      - "${RAG_BACKEND_PORT}:8092"
+    environment:
+      RAG_BACKEND_PORT: 8092
+      RAG_DATA_ROOT: /data/rag-data
+      QDRANT_URL: http://qdrant:6333
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL}
+      MATTERMOST_INTERNAL_URL: ${MATTERMOST_INTERNAL_URL}
+      MATTERMOST_BOT_TOKEN: ${MATTERMOST_BOT_TOKEN}
+      MATTERMOST_RAG_INGEST_ENABLED: ${MATTERMOST_RAG_INGEST_ENABLED:-false}
+      MATTERMOST_RAG_CHANNELS_JSON: ${MATTERMOST_RAG_CHANNELS_JSON:-{}}
+      MATTERMOST_RAG_POLL_STATE_PATH: /data/rag-data/.state/mattermost-rag-poll.json
+      RAG_EMBEDDING_PROVIDER: ${RAG_EMBEDDING_PROVIDER:-local-hash}
+      RAG_EMBEDDING_MODEL: ${RAG_EMBEDDING_MODEL:-nomic-embed-text}
+      RAG_VECTOR_SIZE: ${RAG_VECTOR_SIZE:-384}
+      RAG_CHUNK_SIZE: ${RAG_CHUNK_SIZE:-1400}
+      RAG_CHUNK_OVERLAP: ${RAG_CHUNK_OVERLAP:-180}
+      RAG_TOP_K: ${RAG_TOP_K:-5}
+    volumes:
+      - ./rag-backend:/app:ro
+      - ./rag-data:/data/rag-data
+    depends_on:
+      - qdrant
+      - ollama
+    networks:
+      ai-delivery-net:
+        aliases:
+          - rag-backend
+
+  aigile-backend:
+    image: makeplane/plane-backend:v1.3.1
+    restart: unless-stopped
+    working_dir: /code
+    command: python /app/backend/aigile_backend.py
+    ports:
+      - "${AIGILE_BACKEND_PORT}:8091"
+    environment:
+      DJANGO_SETTINGS_MODULE: plane.settings.production
+      PYTHONPATH: /code
+      SECRET_KEY: ${PLANE_SECRET_KEY}
+      DATABASE_URL: postgresql://plane:plane@plane-db/plane
+      PGHOST: plane-db
+      PGDATABASE: plane
+      POSTGRES_USER: plane
+      POSTGRES_PASSWORD: plane
+      POSTGRES_DB: plane
+      POSTGRES_PORT: 5432
+      REDIS_HOST: plane-redis
+      REDIS_PORT: 6379
+      REDIS_URL: redis://plane-redis:6379/
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL}
+      RAG_BACKEND_URL: http://rag-backend:8092
+      MATTERMOST_INTERNAL_URL: ${MATTERMOST_INTERNAL_URL}
+      MATTERMOST_PUBLIC_URL: ${MATTERMOST_PUBLIC_URL}
+      MATTERMOST_WEBHOOK_URL: ${MATTERMOST_WEBHOOK_URL}
+      MATTERMOST_BOT_TOKEN: ${MATTERMOST_BOT_TOKEN}
+      AIGILE_MATTERMOST_DEFAULT_USERNAME: ${AIGILE_MATTERMOST_DEFAULT_USERNAME:-admin}
+      AIGILE_BACKEND_PORT: 8091
+      AIGILE_KB_PATH: /data/knowledge-base/latest.md
+      AIGILE_LOG_PATH: /data/logs/manual-trigger.log
+      AIGILE_AI_REVIEW_GATE_ENABLED: ${AIGILE_AI_REVIEW_GATE_ENABLED:-true}
+      AIGILE_REVIEW_HISTORY_PATH: /data/logs/ai-review-history.jsonl
+      AIGILE_APPLY_HISTORY_PATH: /data/logs/ai-apply-history.jsonl
+      AIGILE_TASK_CHAT_CONTEXT_PATH: /data/logs/task-chat-context.jsonl
+      AIGILE_TASK_CHAT_THREAD_ENABLED: ${AIGILE_TASK_CHAT_THREAD_ENABLED:-true}
+      AIGILE_TASK_CHAT_POLL_SECONDS: ${AIGILE_TASK_CHAT_POLL_SECONDS:-8}
+      AIGILE_TASK_CHAT_STATE_PATH: /data/logs/task-chat-thread-state.json
+      AIGILE_KB_REFRESH_HOUR: "6"
+      AIGILE_KB_REFRESH_MINUTE: "0"
+    volumes:
+      - ./backend:/app/backend:ro
+      - ./tests:/app/tests:ro
+      - ./knowledge-base:/data/knowledge-base
+      - ./logs:/data/logs
+    depends_on:
+      - ollama
+    networks:
+      ai-delivery-net:
+        aliases:
+          - aigile-backend
+
+volumes:
+  n8n-data:
+  ollama-data:
+  open-webui-data:
+  qdrant-data:
+
+networks:
+  ai-delivery-net:
+    name: ai-delivery-net
+    external: true

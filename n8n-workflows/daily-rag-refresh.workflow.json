@@ -1,0 +1,150 @@
+{
+  "id": "daily-rag-refresh",
+  "name": "Daily RAG Refresh",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "4dd710f3-15af-4a9f-b60c-b30b3c259a6e",
+      "name": "Every Day 06:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -520,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.RAG_BACKEND_URL || 'http://rag-backend:8092') + '/rag/ingest' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ collections: ['knowledge_books', 'project_docs', 'technical_docs', 'team_context', 'decision_log', 'prompt_registry'] }) }}",
+        "options": {
+          "timeout": 240000
+        }
+      },
+      "id": "2557a48f-2608-4b5d-b771-7ed862c212e5",
+      "name": "Refresh RAG",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -280,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const refresh = $items('Refresh RAG')[0]?.json || {};\nconst pages = $items('Sync Plane Pages')[0]?.json || {};\nconst results = refresh.collections || [];\nconst lines = results.map((item) => `- ${item.collection}: ${item.files} files, ${item.chunks} chunks`).join('\\n') || '- no file collections indexed';\nconst pageLine = `- plane_pages: ${pages.indexed?.length || 0} pages indexed, ${pages.deleted?.length || 0} stale sources deleted`;\nconst text = `### Daily RAG Refresh\\n${lines}\\n${pageLine}\\n\\nDuration: ${refresh.duration_seconds || 0}s + Plane Pages ${pages.duration_seconds || 0}s`;\nreturn [{ json: { text } }];"
+      },
+      "id": "22f365b6-15f7-4a8b-88ca-605ef416b7a6",
+      "name": "Build Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.AIGILE_BACKEND_URL || 'http://aigile-backend:8091') + '/api/sync-plane-pages' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ scheduled: true, source: 'n8n-daily-rag-refresh' }) }}",
+        "options": {
+          "timeout": 240000
+        }
+      },
+      "id": "d1e75f32-c8d4-4d24-b4d4-6d4070d64030",
+      "name": "Sync Plane Pages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -40,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MATTERMOST_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ username: 'AI Delivery Assistant', text: $json.text }) }}",
+        "options": {}
+      },
+      "id": "1522762d-33c6-44c7-bc40-3513b1128a91",
+      "name": "Post Report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Every Day 06:00": {
+      "main": [
+        [
+          {
+            "node": "Refresh RAG",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Refresh RAG": {
+      "main": [
+        [
+          {
+            "node": "Sync Plane Pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sync Plane Pages": {
+      "main": [
+        [
+          {
+            "node": "Build Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Report": {
+      "main": [
+        [
+          {
+            "node": "Post Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "pinData": {},
+  "active": false,
+  "tags": []
+}
