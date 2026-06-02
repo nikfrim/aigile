@@ -27,6 +27,23 @@ The agent must not update Plane without `y` or `да`.
 
 Use quick prefixes at the start of a message when you want the agent to prepare a structured task update.
 
+### `!help`
+
+Shows a short command guide directly in the Mattermost task thread.
+
+### `!status`
+
+Shows what the agent currently remembers about the Plane task:
+
+- issue key and title;
+- detected type;
+- latest AI review status;
+- parent context count;
+- child tasks count;
+- relations count;
+- module and cycle count;
+- whether a draft is waiting for approval.
+
 ### `!ac`
 
 Acceptance criteria.

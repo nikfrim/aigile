@@ -16,6 +16,10 @@ Status: in progress
 - Local health dashboard at `http://localhost:8091/dashboard`.
 - Machine-readable health endpoint at `http://localhost:8091/healthz`.
 - Health checks for AIGILE backend, Plane database, Plane web, Mattermost, n8n, Ollama, RAG backend, Qdrant, and Open WebUI.
+- Task Chat MVP 2 helpers:
+  - `!help` command in Mattermost task threads;
+  - `!status` command showing task-chat memory and pending draft state;
+  - test coverage for `!risk`, `!dep`, and `!deadline` command routing.
 
 ### Next
 

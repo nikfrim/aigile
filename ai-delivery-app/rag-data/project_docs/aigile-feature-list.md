@@ -109,9 +109,11 @@ Updated: 2026-05-27
 - Approved drafts are saved to AI apply history.
 - Cancellation commands `n` or `нет` discard the pending draft.
 - Quick task-chat prefixes are supported: `!ac`, `!note`, `!risk`, `!dep`, `!deadline`.
+- `!help` shows a command guide inside the task thread.
+- `!status` shows current task-chat memory: issue, type, review status, parent context, children, relations, modules, cycles, dialogue count, and pending draft state.
 - Old or inaccessible threads are skipped safely and do not break the poller.
 - Thread processing state is stored in `ai-delivery-app/logs/task-chat-thread-state.json`.
-- Current safety rule: chat can discuss and propose Plane changes, but does not update Plane without a future approval flow.
+- Current safety rule: chat can discuss and propose Plane changes, but does not update Plane without explicit `y` / `да` approval.
 
 ## Task Context Graph
 

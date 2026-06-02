@@ -1985,6 +1985,16 @@ def is_task_chat_cancel(value: str) -> bool:
     return text in cancel_terms
 
 
+def is_task_chat_help(value: str) -> bool:
+    text = normalize_chat_text(value).strip(" .!,;:")
+    return text in {"!help", "/help", "help", "помощь", "что ты умеешь"}
+
+
+def is_task_chat_status(value: str) -> bool:
+    text = normalize_chat_text(value).strip(" .!,;:")
+    return text in {"!status", "/status", "status", "статус", "контекст", "память"}
+
+
 def looks_like_task_update_request(value: str) -> bool:
     text = normalize_chat_text(value)
     patterns = [
@@ -2009,6 +2019,55 @@ def looks_like_task_update_request(value: str) -> bool:
         "add to task",
     ]
     return any(pattern in text for pattern in patterns)
+
+
+def format_task_chat_help() -> str:
+    return """**AIGILE Task Agent**
+
+Я держу контекст этой Plane-задачи в треде: описание, метки, статус, родительский эпик, связи, модуль, цикл и последний AI review.
+
+Команды:
+
+- `!ac` - acceptance criteria в описание задачи с пометкой `[AI]`;
+- `!note` - заметка в комментарий;
+- `!risk` - риск в комментарий;
+- `!dep` - зависимость в комментарий;
+- `!deadline` - заметка о сроке в комментарий;
+- `!status` - что я помню по этой задаче;
+- `!help` - показать эту памятку.
+
+Я не меняю Plane сразу. Сначала готовлю черновик.
+Применить: `y` или `да`.
+Отменить: `n` или `нет`."""
+
+
+def format_task_chat_status(context: dict, thread_state: dict) -> str:
+    graph = context.get("context_graph") if isinstance(context.get("context_graph"), dict) else {}
+    issue = graph.get("current") or context.get("issue") or {}
+    parent_chain = graph.get("parent_chain") or []
+    children = graph.get("children") or []
+    relations = graph.get("relations") or {}
+    outgoing = relations.get("outgoing") or []
+    incoming = relations.get("incoming") or []
+    modules = graph.get("modules") or []
+    cycles = graph.get("cycles") or []
+    latest_review = graph.get("latest_review") or {}
+    pending = thread_state.get("pending_draft") if isinstance(thread_state.get("pending_draft"), dict) else None
+    return f"""**Память по задаче**
+
+Задача: `{issue.get("key") or context.get("issue_key")}` {issue.get("title") or ""}
+Тип: `{issue.get("detected_type") or issue.get("type") or context.get("detected_type") or "unknown"}`
+AI review: `{latest_review.get("overall_status") or context.get("overall_status") or "unknown"}`
+
+Контекст:
+- родительская цепочка: {len(parent_chain)}
+- дочерние задачи: {len(children)}
+- связи: {len(outgoing) + len(incoming)}
+- модули: {len(modules)}
+- циклы: {len(cycles)}
+- сообщений в памяти треда: {len(thread_state.get("dialogue_history") or [])}
+
+Черновик: {"есть, жду `y` / `да` или `n` / `нет`" if pending else "нет ожидающих изменений"}"""
 
 
 def append_thread_dialogue(thread_state: dict, role: str, message: str, post_id: str | None = None) -> None:
@@ -2384,7 +2443,11 @@ def poll_task_chat_threads(payload: dict | None = None) -> dict:
             saved_history = state_dialogue_history(thread_state)
             history = "\n".join(item for item in [saved_history, live_history] if item).strip()
             pending_draft = thread_state.get("pending_draft") if isinstance(thread_state.get("pending_draft"), dict) else None
-            if pending_draft and is_task_chat_cancel(message):
+            if is_task_chat_help(message):
+                answer = format_task_chat_help()
+            elif is_task_chat_status(message):
+                answer = format_task_chat_status(context, thread_state)
+            elif pending_draft and is_task_chat_cancel(message):
                 thread_state.pop("pending_draft", None)
                 answer = "Ок, черновик отменён. Plane не изменял."
             elif pending_draft and is_task_chat_approval(message):

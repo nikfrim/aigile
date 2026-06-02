@@ -568,11 +568,100 @@ class ReviewGateTests(unittest.TestCase):
         self.assertIn("Черновик изменения готов", post_message.call_args.args[1])
         write_state.assert_called_once()
 
+    def test_task_chat_help_replies_without_creating_draft(self):
+        context = {
+            "ok": True,
+            "context_id": "ctx-1",
+            "issue_key": "AIGILE-1",
+            "channel_id": "channel-1",
+            "thread_root_id": "root-1",
+            "issue": {"key": "AIGILE-1", "title": "Login bug"},
+            "context_graph": {"current": {"key": "AIGILE-1", "title": "Login bug"}},
+        }
+        state = {"threads": {"root-1": {"processed_post_ids": ["root-1"]}}}
+        posts = [
+            {"id": "root-1", "user_id": "bot-1", "message": "Task card", "create_at": 1},
+            {"id": "user-reply-1", "user_id": "user-1", "message": "!help", "create_at": 2},
+        ]
+        with (
+            mock.patch.object(aigile_backend, "read_task_chat_contexts", return_value=[context]),
+            mock.patch.object(aigile_backend, "mattermost_current_user", return_value={"id": "bot-1"}),
+            mock.patch.object(aigile_backend, "read_task_chat_state", return_value=state),
+            mock.patch.object(aigile_backend, "mattermost_thread_posts", return_value=posts),
+            mock.patch.object(aigile_backend, "post_mattermost_channel_message", return_value={"id": "bot-reply-1"}) as post_message,
+            mock.patch.object(aigile_backend, "write_task_chat_state"),
+            mock.patch.object(aigile_backend, "append_execution_log"),
+        ):
+            result = aigile_backend.poll_task_chat_threads({"force": True})
+
+        self.assertTrue(result["ok"])
+        self.assertNotIn("pending_draft", state["threads"]["root-1"])
+        self.assertIn("AIGILE Task Agent", post_message.call_args.args[1])
+        self.assertIn("!status", post_message.call_args.args[1])
+
+    def test_task_chat_status_shows_memory_without_creating_draft(self):
+        context = {
+            "ok": True,
+            "context_id": "ctx-1",
+            "issue_key": "AIGILE-1",
+            "channel_id": "channel-1",
+            "thread_root_id": "root-1",
+            "issue": {"key": "AIGILE-1", "title": "Login bug"},
+            "context_graph": {
+                "current": {"key": "AIGILE-1", "title": "Login bug", "type": "Bug"},
+                "parent_chain": [{"key": "AIGILE-10"}],
+                "children": [{"key": "AIGILE-2"}],
+                "relations": {"outgoing": [{"key": "AIGILE-3"}], "incoming": []},
+                "modules": [{"name": "Auth"}],
+                "cycles": [{"name": "Sprint"}],
+                "latest_review": {"overall_status": "yellow"},
+            },
+        }
+        state = {"threads": {"root-1": {"processed_post_ids": ["root-1"], "dialogue_history": [{"role": "user", "message": "previous"}]}}}
+        posts = [
+            {"id": "root-1", "user_id": "bot-1", "message": "Task card", "create_at": 1},
+            {"id": "user-reply-1", "user_id": "user-1", "message": "!status", "create_at": 2},
+        ]
+        with (
+            mock.patch.object(aigile_backend, "read_task_chat_contexts", return_value=[context]),
+            mock.patch.object(aigile_backend, "mattermost_current_user", return_value={"id": "bot-1"}),
+            mock.patch.object(aigile_backend, "read_task_chat_state", return_value=state),
+            mock.patch.object(aigile_backend, "mattermost_thread_posts", return_value=posts),
+            mock.patch.object(aigile_backend, "post_mattermost_channel_message", return_value={"id": "bot-reply-1"}) as post_message,
+            mock.patch.object(aigile_backend, "write_task_chat_state"),
+            mock.patch.object(aigile_backend, "append_execution_log"),
+        ):
+            result = aigile_backend.poll_task_chat_threads({"force": True})
+
+        self.assertTrue(result["ok"])
+        self.assertNotIn("pending_draft", state["threads"]["root-1"])
+        self.assertIn("AIGILE-1", post_message.call_args.args[1])
+        self.assertIn("yellow", post_message.call_args.args[1])
+
     def test_task_chat_detects_acceptance_criteria_without_prefix(self):
         command = aigile_backend.detect_task_chat_command("сформируй Acceptance criteria чтобы мы это не забыли")
 
         self.assertEqual(command["command"], "!ac")
         self.assertEqual(command["change_kind"], "acceptance criteria")
+
+    def test_task_chat_detects_quick_update_commands(self):
+        cases = {
+            "!risk auth can block release": ("!risk", "risk note"),
+            "!dep depends on backend endpoint": ("!dep", "dependency note"),
+            "!deadline finish before June 16": ("!deadline", "deadline note"),
+        }
+
+        for message, expected in cases.items():
+            with self.subTest(message=message):
+                command = aigile_backend.detect_task_chat_command(message)
+                self.assertEqual(command["command"], expected[0])
+                self.assertEqual(command["change_kind"], expected[1])
+
+    def test_task_chat_help_and_status_detection(self):
+        self.assertTrue(aigile_backend.is_task_chat_help("!help"))
+        self.assertTrue(aigile_backend.is_task_chat_status("!status"))
+        self.assertFalse(aigile_backend.looks_like_task_update_request("!help"))
+        self.assertFalse(aigile_backend.looks_like_task_update_request("!status"))
 
     def test_plane_page_rag_requires_ai_marker_and_public_access(self):
         public_page = SimpleNamespace(name="[AI] Agent Rules", access=0, deleted_at=None, archived_at=None)
