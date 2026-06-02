@@ -26,6 +26,11 @@ Status: in progress
   - `[AI] Epic Template`;
   - `[AI] Agent Response Rules`.
 - AI Review Gate and Mattermost task chat now explicitly request the relevant type template and response rules from the separate `plane_pages` RAG collection.
+- Live demo seed/reset:
+  - `.\seed-demo.ps1`;
+  - `.\reset-demo.ps1`;
+  - backend endpoints `POST /api/demo/seed` and `POST /api/demo/reset`;
+  - four reproducible `[DEMO]` work items for Story, Bug, Epic, and Tech Debt review scenarios.
 
 ### Next
 

@@ -155,6 +155,21 @@ class HealthDashboardTests(unittest.TestCase):
         self.assertEqual(report["services_down"], 1)
 
 
+class DemoSeedTests(unittest.TestCase):
+    def test_demo_issue_specs_are_predictable_and_typed(self):
+        self.assertEqual(len(aigile_backend.DEMO_ISSUES), 4)
+        type_labels = {spec["type_label"] for spec in aigile_backend.DEMO_ISSUES}
+        self.assertEqual(type_labels, {"Story", "Bug", "Epic", "Tech Debt"})
+        for spec in aigile_backend.DEMO_ISSUES:
+            self.assertTrue(spec["title"].startswith("[DEMO] "))
+            self.assertIn("Known Gaps For Demo", spec["description"])
+            self.assertIn(spec["type_label"], aigile_backend.KNOWN_ISSUE_TYPES.values())
+
+    def test_demo_label_and_prefix_are_stable(self):
+        self.assertEqual(aigile_backend.DEMO_LABEL_NAME, "AIGILE-DEMO")
+        self.assertEqual(aigile_backend.DEMO_TITLE_PREFIX, "[DEMO]")
+
+
 class ReviewGateTests(unittest.TestCase):
     def test_detect_issue_type_from_type_label_title_and_fallback(self):
         self.assertEqual(aigile_backend.detect_issue_type({"type": "Story"}), "Story")

@@ -28,6 +28,23 @@ Updated: 2026-05-27
 - The dashboard checks AIGILE backend, Plane database, Plane web, Mattermost, n8n, Ollama, RAG backend, Qdrant, and Open WebUI.
 - The dashboard is a pre-smoke-test step: if it is degraded, the failing service should be fixed before running longer product scenarios.
 
+## Live Demo Seed / Reset
+
+- AIGILE has reproducible live demo work items for interviews and product demos.
+- Demo data is limited to issues with title prefix `[DEMO]` and label `AIGILE-DEMO`.
+- Seed/reset commands:
+  - `.\seed-demo.ps1`
+  - `.\reset-demo.ps1`
+- Backend API endpoints:
+  - `POST /api/demo/seed`
+  - `POST /api/demo/reset`
+- Demo issues are intentionally imperfect so AI Review Gate returns useful yellow/red findings:
+  - `[DEMO] Story - Customer can request delivery slot`
+  - `[DEMO] Bug - Payment confirmation is not shown after successful payment`
+  - `[DEMO] Epic - AI-assisted backlog refinement`
+  - `[DEMO] Tech Debt - Refactor AI review orchestration`
+- Reset restores demo title, description, state, priority, and labels without touching ordinary Plane data.
+
 ## Plane Structure
 
 - Projects were corrected from wrong type-based projects to domain-oriented projects:

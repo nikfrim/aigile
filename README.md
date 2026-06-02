@@ -129,6 +129,70 @@ The pack covers:
 - Plane Pages sync;
 - git safety checks.
 
+## Live Demo Seed / Reset
+
+Use this before an interview or live product demo when you need predictable Plane work items for showing AIGILE capabilities.
+
+The demo pack creates or restores only work items with:
+
+- label: `AIGILE-DEMO`
+- title prefix: `[DEMO]`
+
+It does not touch ordinary Plane data without the demo title/label.
+
+### Seed demo data
+
+```powershell
+.\seed-demo.ps1
+```
+
+Equivalent container command:
+
+```powershell
+$env:DOCKER_HOST='tcp://127.0.0.1:2375'
+$env:DOCKER_CONFIG=(Join-Path (Get-Location) '.docker-config')
+docker exec ai-delivery-app-aigile-backend-1 python /app/backend/aigile_backend.py seed-demo
+```
+
+### Reset demo data
+
+```powershell
+.\reset-demo.ps1
+```
+
+Reset restores the demo issues to their original titles, descriptions, state, priority, and labels.
+It also removes non-demo labels from those demo issues so the next demo starts clean.
+
+### Demo issues
+
+The seed creates four intentionally imperfect work items in `AIGILE Platform`:
+
+- `[DEMO] Story - Customer can request delivery slot`
+- `[DEMO] Bug - Payment confirmation is not shown after successful payment`
+- `[DEMO] Epic - AI-assisted backlog refinement`
+- `[DEMO] Tech Debt - Refactor AI review orchestration`
+
+Each issue has the `AIGILE-DEMO` label plus the correct type label: `Story`, `Bug`, `Epic`, or `Tech Debt`.
+
+### Manual verification
+
+1. Open the health dashboard: http://localhost:8091/dashboard
+2. Confirm all services are green.
+3. Run `.\reset-demo.ps1`.
+4. Open Plane: http://localhost:8080/aigile/projects/882d9973-7e7d-4ad7-ba0f-df2f1c28e825/issues/
+5. Find issues with `[DEMO]` in the title.
+6. Open the Story demo issue and run `AI анализ`.
+7. Confirm Agent Router selects Story agents and returns useful yellow/red findings.
+8. Open the Bug demo issue and run `AI анализ`.
+9. Confirm QA returns red or strong yellow because expected/actual result, reproduction steps, and environment are missing.
+10. Use `В Mattermost` after AI review to show the task thread flow.
+
+### Demo readiness note
+
+The demo seed/reset does not require the LLM to be warm.
+AI Review Gate does require Ollama inference. Before an interview, run one short AI analysis or a short Ollama chat request a few minutes before the live demo so the model is loaded.
+If Ollama cold-start is slow, use the health dashboard and demo issues first, then run AI Review after the model is ready.
+
 ## Health Dashboard
 
 Human-readable local status page:

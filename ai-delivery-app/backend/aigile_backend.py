@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import hashlib
+import sys
 import threading
 import time
 import uuid
@@ -21,12 +22,17 @@ django.setup()
 
 from django.db import close_old_connections, transaction  # noqa: E402
 from django.utils.html import escape, strip_tags  # noqa: E402
-from plane.db.models import CycleIssue, Issue, IssueComment, IssueLabel, IssueRelation, IssueView, Label, ModuleIssue, Page, Project, ProjectPage, Workspace  # noqa: E402
+from plane.db.models import CycleIssue, Issue, IssueComment, IssueLabel, IssueRelation, IssueSequence, IssueView, Label, ModuleIssue, Page, Project, ProjectPage, State, Workspace  # noqa: E402
 
 
 PORT = int(os.environ.get("AIGILE_BACKEND_PORT", "8091"))
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:7b-instruct")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:3b")
+OLLAMA_FALLBACK_MODELS = [
+    item.strip()
+    for item in os.environ.get("AIGILE_OLLAMA_FALLBACK_MODELS", "qwen2.5-coder:3b,qwen3:8b,qwen2.5-coder:7b").split(",")
+    if item.strip()
+]
 RAG_BACKEND_URL = os.environ.get("RAG_BACKEND_URL", "http://rag-backend:8092").rstrip("/")
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333").rstrip("/")
 N8N_INTERNAL_URL = os.environ.get("N8N_INTERNAL_URL", "http://n8n:5678").rstrip("/")
@@ -96,6 +102,8 @@ AGENT_MAP = {
 
 TYPE_LABEL_NAMES = ["Epic", "Story", "Bug", "Task", "Tech Debt", "Research", "Release"]
 TYPE_LABEL_ERROR = "Выбери тип задачи через метку Epic, Story, Bug, Task, Tech Debt, Research или Release."
+DEMO_LABEL_NAME = "AIGILE-DEMO"
+DEMO_TITLE_PREFIX = "[DEMO]"
 
 
 def utc_now_iso() -> str:
@@ -730,13 +738,16 @@ def read_knowledge_base() -> str:
 
 def ollama_model_candidates() -> list[str]:
     candidates = [OLLAMA_MODEL]
+    for model in OLLAMA_FALLBACK_MODELS:
+        if model not in candidates:
+            candidates.append(model)
     try:
         req = Request(f"{OLLAMA_BASE_URL}/api/tags", method="GET")
         with urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode("utf-8"))
         for item in data.get("models") or []:
             name = item.get("name") or item.get("model")
-            if name and "embed" not in name.lower() and name not in candidates:
+            if name and "embed" not in name.lower() and "30b" not in name.lower() and name not in candidates:
                 candidates.append(name)
     except Exception as exc:
         logger.warning("Could not read Ollama model list: %s", exc)
@@ -1363,6 +1374,237 @@ def create_issue_comment(issue: Issue, markdown: str) -> IssueComment:
         comment_json=text_to_description_json(markdown),
         access="INTERNAL",
     )
+
+
+DEMO_ISSUES = [
+    {
+        "key": "story-delivery-slot",
+        "type_label": "Story",
+        "state": "Discovery",
+        "priority": "medium",
+        "title": "[DEMO] Story - Customer can request delivery slot",
+        "description": """## User Story
+As a customer, I want to request a preferred delivery slot so that I can plan when my order arrives.
+
+## Current Scope
+- Customer selects a delivery date.
+- Customer submits the request during checkout.
+- Operations team should see the requested slot.
+
+## Known Gaps For Demo
+- Acceptance criteria are intentionally incomplete.
+- Edge cases are not defined.
+- Validation rules for unavailable slots are missing.
+- Timezone and availability risks are not resolved.
+
+## Acceptance Criteria
+- Customer can choose a delivery date.
+""",
+    },
+    {
+        "key": "bug-payment-confirmation",
+        "type_label": "Bug",
+        "state": "Triage",
+        "priority": "high",
+        "title": "[DEMO] Bug - Payment confirmation is not shown after successful payment",
+        "description": """## Problem
+Some customers say they are not sure whether payment succeeded.
+
+## Context
+The payment provider returns success, but the user may not see a clear confirmation screen.
+
+## Known Gaps For Demo
+- Actual result is missing.
+- Expected result is missing.
+- Steps to reproduce are missing.
+- Browser / device / environment are missing.
+- Impact is described only vaguely.
+""",
+    },
+    {
+        "key": "epic-ai-backlog-refinement",
+        "type_label": "Epic",
+        "state": "Discovery",
+        "priority": "high",
+        "title": "[DEMO] Epic - AI-assisted backlog refinement",
+        "description": """## Product Idea
+Use AI agents to help Product and Delivery Managers refine backlog items before they are handed to engineering.
+
+## Business Outcome
+Improve task readiness and reduce clarification loops during sprint planning.
+
+## Initial Scope
+- AI reviews work items.
+- AI suggests missing acceptance criteria, risks, and dependencies.
+- Human approval remains mandatory.
+
+## Known Gaps For Demo
+- Decomposition into features and stories is incomplete.
+- Dependency mapping is not complete.
+- Rollout strategy is missing.
+- Security and audit requirements are not finalized.
+- Success metrics are still broad.
+""",
+    },
+    {
+        "key": "techdebt-review-orchestration",
+        "type_label": "Tech Debt",
+        "state": "Refinement",
+        "priority": "medium",
+        "title": "[DEMO] Tech Debt - Refactor AI review orchestration",
+        "description": """## Technical Context
+AI Review Gate currently orchestrates several review agents from the AIGILE backend.
+
+## Proposed Direction
+Refactor orchestration so agent routing, prompt building, and result normalization are easier to extend.
+
+## Trade-offs
+- Cleaner extension path for new agents.
+- Risk of breaking the current working review flow.
+- May require new tests around retries and partial failures.
+
+## Known Gaps For Demo
+- Rollback plan is missing.
+- Performance constraints are missing.
+- Migration steps are missing.
+- Compatibility with current Plane and Mattermost flows needs review.
+""",
+    },
+]
+
+
+def find_demo_project() -> Project:
+    workspace = Workspace.objects.filter(slug=PLANE_PAGES_WORKSPACE_SLUG, deleted_at__isnull=True).first()
+    if not workspace:
+        raise ValueError(f"Workspace not found: {PLANE_PAGES_WORKSPACE_SLUG}")
+    project = Project.objects.filter(
+        workspace=workspace,
+        identifier=PLANE_PAGES_PROJECT_IDENTIFIER,
+        deleted_at__isnull=True,
+    ).first()
+    if not project:
+        raise ValueError(f"Project not found: {PLANE_PAGES_PROJECT_IDENTIFIER}")
+    return project
+
+
+def ensure_project_label(project: Project, name: str, description: str, color: str) -> Label:
+    label = Label.objects.filter(workspace=project.workspace, project=project, name=name, deleted_at__isnull=True).first()
+    if not label:
+        label = Label.objects.create(
+            workspace=project.workspace,
+            project=project,
+            name=name,
+            description=description,
+            color=color,
+            created_by=getattr(project, "created_by", None),
+            updated_by=getattr(project, "updated_by", None) or getattr(project, "created_by", None),
+        )
+    return label
+
+
+def default_demo_state(project: Project, state_name: str | None = None) -> State | None:
+    if state_name:
+        state = State.objects.filter(
+            workspace=project.workspace,
+            project=project,
+            name__iexact=state_name,
+            deleted_at__isnull=True,
+        ).first()
+        if state:
+            return state
+    return (
+        State.objects.filter(workspace=project.workspace, project=project, default=True, deleted_at__isnull=True).first()
+        or State.objects.filter(workspace=project.workspace, project=project, name__iexact="Backlog", deleted_at__isnull=True).first()
+        or State.objects.filter(workspace=project.workspace, project=project, deleted_at__isnull=True).order_by("sequence").first()
+    )
+
+
+def next_issue_sequence(project: Project) -> int:
+    last = Issue.objects.filter(workspace=project.workspace, project=project).order_by("-sequence_id").values_list("sequence_id", flat=True).first()
+    return int(last or 0) + 1
+
+
+def reset_issue_labels(issue: Issue, labels: list[Label]) -> None:
+    IssueLabel.objects.filter(workspace=issue.workspace, project=issue.project, issue=issue, deleted_at__isnull=True).exclude(
+        label__in=labels
+    ).update(deleted_at=datetime.now(timezone.utc))
+    for label in labels:
+        add_issue_label(issue, label)
+
+
+def upsert_demo_issue(project: Project, spec: dict) -> Issue:
+    demo_label = ensure_project_label(project, DEMO_LABEL_NAME, "AIGILE live demo work item.", "#F59E0B")
+    type_label = ensure_project_label(project, spec["type_label"], f"Demo type label: {spec['type_label']}.", "#22C55E")
+    state = default_demo_state(project, spec.get("state"))
+    title = spec["title"]
+    actor = getattr(project, "updated_by", None) or getattr(project, "created_by", None)
+    issue = (
+        Issue.objects.filter(workspace=project.workspace, project=project, name=title, deleted_at__isnull=True).first()
+        or Issue.objects.filter(workspace=project.workspace, project=project, external_source="aigile-demo", external_id=spec["key"], deleted_at__isnull=True).first()
+    )
+    created = False
+    if not issue:
+        issue = Issue(
+            workspace=project.workspace,
+            project=project,
+            name=title,
+            sequence_id=next_issue_sequence(project),
+            sort_order=65535,
+            created_by=actor,
+            updated_by=actor,
+            external_source="aigile-demo",
+            external_id=spec["key"],
+        )
+        created = True
+    issue.name = title
+    issue.description_stripped = spec["description"]
+    issue.description_html = markdown_to_basic_html(spec["description"])
+    issue.description_json = text_to_description_json(spec["description"])
+    issue.state = state
+    issue.priority = spec.get("priority", "medium")
+    issue.is_draft = False
+    issue.archived_at = None
+    issue.completed_at = None
+    issue.external_source = "aigile-demo"
+    issue.external_id = spec["key"]
+    issue.updated_by = actor
+    issue.save()
+    if created:
+        IssueSequence.objects.create(
+            workspace=project.workspace,
+            project=project,
+            issue=issue,
+            sequence=issue.sequence_id,
+            created_by=actor,
+            updated_by=actor,
+        )
+    reset_issue_labels(issue, [demo_label, type_label])
+    return issue
+
+
+def seed_demo_data(reset: bool = False) -> dict:
+    project = find_demo_project()
+    with transaction.atomic():
+        issues = [upsert_demo_issue(project, spec) for spec in DEMO_ISSUES]
+    action = "reset" if reset else "seed"
+    result = {
+        "ok": True,
+        "action": action,
+        "project": project.name,
+        "project_identifier": project.identifier,
+        "label": DEMO_LABEL_NAME,
+        "count": len(issues),
+        "issues": [
+            {
+                "key": f"{project.identifier}-{issue.sequence_id}",
+                "title": issue.name,
+                "url": issue_to_payload(issue)["url"],
+            }
+            for issue in issues
+        ],
+    }
+    append_execution_log({"event": f"demo_{action}", "count": len(issues)})
+    return result
 
 
 def mark_issue_with_ai_label(issue: Issue, label_kind: str) -> str | None:
@@ -3137,6 +3379,22 @@ class Handler(BaseHTTPRequestHandler):
                 logger.exception("Plane Pages sync failed")
                 json_response(self, 500, {"ok": False, "error": str(exc)})
             return
+        if parsed.path == "/api/demo/seed":
+            try:
+                result = seed_demo_data(reset=False)
+                json_response(self, 200, result)
+            except Exception as exc:
+                logger.exception("Demo seed failed")
+                json_response(self, 500, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/api/demo/reset":
+            try:
+                result = seed_demo_data(reset=True)
+                json_response(self, 200, result)
+            except Exception as exc:
+                logger.exception("Demo reset failed")
+                json_response(self, 500, {"ok": False, "error": str(exc)})
+            return
         json_response(self, 404, {"ok": False, "error": "Not found"})
 
     def log_message(self, fmt: str, *args) -> None:
@@ -3144,6 +3402,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] in {"seed-demo", "reset-demo"}:
+        ensure_dirs()
+        result = seed_demo_data(reset=sys.argv[1] == "reset-demo")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        raise SystemExit(0)
     ensure_dirs()
     threading.Thread(target=initial_refresh_loop, daemon=True).start()
     threading.Thread(target=scheduler_loop, daemon=True).start()
