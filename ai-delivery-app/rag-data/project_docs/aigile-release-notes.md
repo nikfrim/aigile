@@ -20,6 +20,12 @@ Status: in progress
   - `!help` command in Mattermost task threads;
   - `!status` command showing task-chat memory and pending draft state;
   - test coverage for `!risk`, `!dep`, and `!deadline` command routing.
+- Plane Pages knowledge templates:
+  - `[AI] Bug Template`;
+  - `[AI] Story Template`;
+  - `[AI] Epic Template`;
+  - `[AI] Agent Response Rules`.
+- AI Review Gate and Mattermost task chat now explicitly request the relevant type template and response rules from the separate `plane_pages` RAG collection.
 
 ### Next
 

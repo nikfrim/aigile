@@ -167,12 +167,17 @@ Example:
 - Only Public pages with `[AI]` in the title are indexed.
 - Indexed pages go to the separate `plane_pages` collection and are not mixed with `knowledge_books`.
 - Removed, archived, private, or unapproved pages are deleted from `plane_pages`.
-- `[AI] AIGILE Agent Rules` is bootstrapped as the default strict rules page.
+- Bootstrap now creates strict Plane Pages for reusable agent knowledge:
+  - `[AI] AIGILE Agent Rules`
+  - `[AI] Bug Template`
+  - `[AI] Story Template`
+  - `[AI] Epic Template`
+  - `[AI] Agent Response Rules`
 - Admin can trigger sync manually through `POST /api/sync-plane-pages`.
 - Daily refresh includes a separate Plane Pages sync step.
 - AI Review Gate and Mattermost task chat use `plane_pages` as strict project knowledge.
-- AI Review Gate queries `plane_pages` with task type and selected agent names so per-agent rules are retrieved.
-- Mattermost task chat queries `plane_pages` with `Task Chat Agent`, `AIGILE Agent Rules`, and task-thread context so approved page rules guide answers and drafts.
+- AI Review Gate queries `plane_pages` with task type, selected agent names, type template, and response rules so per-agent rules are retrieved.
+- Mattermost task chat queries `plane_pages` with `Task Chat Agent`, `AIGILE Agent Rules`, type template, response rules, and task-thread context so approved page rules guide answers and drafts.
 
 ## Demo Data
 

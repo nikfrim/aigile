@@ -259,7 +259,17 @@ class ReviewGateTests(unittest.TestCase):
         query = pages_context.call_args.args[0]
         self.assertIn("AI Review Gate", query)
         self.assertIn("Task type: Epic", query)
+        self.assertIn("Epic Template", query)
+        self.assertIn("Agent Response Rules", query)
         self.assertIn("Product Manager Agent", query)
+
+    def test_plane_knowledge_templates_include_core_pages(self):
+        titles = set(aigile_backend.PLANE_KNOWLEDGE_TEMPLATE_PAGES)
+        self.assertIn(aigile_backend.AGENT_RULES_PAGE_TITLE, titles)
+        self.assertIn("[AI] Bug Template", titles)
+        self.assertIn("[AI] Story Template", titles)
+        self.assertIn("[AI] Epic Template", titles)
+        self.assertIn("[AI] Agent Response Rules", titles)
 
     def test_review_history_append_and_read(self):
         tmp = Path(tempfile.gettempdir()) / "aigile-test-review-history.jsonl"
@@ -429,10 +439,10 @@ class ReviewGateTests(unittest.TestCase):
     def test_task_chat_reply_includes_plane_pages_strict_context(self):
         context = {
             "issue_key": "AIGILE-10",
-            "issue": {"key": "AIGILE-10", "title": "Registration"},
+            "issue": {"key": "AIGILE-10", "title": "Registration", "type": "Bug"},
         }
         graph = {
-            "current": {"key": "AIGILE-10", "title": "Registration"},
+            "current": {"key": "AIGILE-10", "title": "Registration", "type": "Bug"},
             "parents": [],
             "children": [],
             "relations": {},
@@ -457,6 +467,8 @@ class ReviewGateTests(unittest.TestCase):
         self.assertIn("STRICT TASK CHAT RULES", captured["prompt"])
         query = pages_context.call_args.args[0]
         self.assertIn("Task Chat Agent", query)
+        self.assertIn("Bug Template", query)
+        self.assertIn("Agent Response Rules", query)
         self.assertIn("Acceptance Criteria", query)
 
     def test_start_task_chat_sends_dm_and_saves_context(self):

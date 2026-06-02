@@ -70,12 +70,19 @@ Local URL:
 http://localhost:8091/api/sync-plane-pages
 ```
 
-## Agent Rules Page
+## Bootstrap Pages
 
-The sync bootstraps a default page:
+The sync bootstraps default Public `[AI]` pages for strict project knowledge:
 
 ```text
 [AI] AIGILE Agent Rules
+[AI] Bug Template
+[AI] Story Template
+[AI] Epic Template
+[AI] Agent Response Rules
 ```
 
-Agents treat this page as strict project knowledge for answer formats, review behavior, task-chat drafts, and comment rules.
+Agents treat these pages as strict project knowledge for issue templates, answer formats, review behavior, task-chat drafts, and comment rules.
+
+AI Review Gate explicitly searches for the detected type template and agent response rules.
+Mattermost task chat also searches for the detected task type template before drafting answers or Plane comments.

@@ -815,6 +815,8 @@ def read_project_pages_context(query: str, limit: int = 5) -> str:
 def build_review_project_pages_query(issue_payload: dict, detected_type: str, agent_names: list[str]) -> str:
     return "\n".join([
         "AIGILE Agent Rules",
+        "Agent Response Rules",
+        f"{detected_type} Template",
         "AI Review Gate",
         f"Task type: {detected_type}",
         "Agents: " + ", ".join(agent_names),
@@ -835,8 +837,12 @@ def build_review_context(issue_payload: dict, detected_type: str, agent_names: l
 
 
 def build_task_chat_project_pages_query(issue: dict, user_message: str, thread_history: str) -> str:
+    latest_review = issue.get("latest_review") if isinstance(issue.get("latest_review"), dict) else {}
+    issue_type = issue.get("type") or issue.get("detected_type") or latest_review.get("detected_type") or ""
     return "\n".join([
         "AIGILE Agent Rules",
+        "Agent Response Rules",
+        f"{issue_type} Template",
         "Task Chat Agent",
         "Mattermost task thread",
         "Acceptance Criteria",
@@ -1426,6 +1432,195 @@ This page is a strict project knowledge source for AIGILE agents. It is approved
 """
 
 
+PLANE_KNOWLEDGE_TEMPLATE_PAGES = {
+    AGENT_RULES_PAGE_TITLE: AGENT_RULES_PAGE_MARKDOWN,
+    "[AI] Bug Template": """# Bug Template
+
+This page is strict project knowledge for Bug work items in AIGILE.
+
+## Required Fields
+
+- Summary: short user-visible problem.
+- Current behavior: what happens now.
+- Expected behavior: what should happen.
+- Steps to reproduce: numbered, reproducible path.
+- Environment: browser, OS, service, deployment, data state.
+- Severity: business or user impact.
+- Priority: delivery priority.
+- Regression: yes/no/unknown.
+- Root cause: known/unknown.
+- Acceptance Criteria: testable fix conditions.
+
+## AI Review Rules
+
+- If reproduction steps are missing, status should be at least yellow.
+- If current and expected behavior are both missing, status should be red.
+- If the bug cannot be tested from the description, status should be red.
+- If environment is unknown but the bug is still understandable, status can be yellow.
+- Do not invent root cause. Mark it as unknown when needed.
+
+## Recommended Plane Description
+
+```text
+## Problem
+
+## Current Behavior
+
+## Expected Behavior
+
+## Steps To Reproduce
+1.
+2.
+3.
+
+## Environment
+
+## Severity / Priority
+
+## Regression
+
+## Acceptance Criteria
+- 
+```
+""",
+    "[AI] Story Template": """# Story Template
+
+This page is strict project knowledge for Story work items in AIGILE.
+
+## Required Fields
+
+- User / actor.
+- User goal.
+- Product value.
+- Scope.
+- Out of scope.
+- Acceptance Criteria.
+- Dependencies.
+- UX notes when relevant.
+- Analytics or KPI when relevant.
+- Edge cases.
+
+## AI Review Rules
+
+- If user value is missing, Product Owner Agent should mark yellow or red.
+- If Acceptance Criteria are missing, QA Agent should mark yellow or red.
+- If dependencies are unknown, Architect Agent should call this out.
+- Keep implementation notes separate from product behavior.
+
+## Recommended Plane Description
+
+```text
+## User Story
+As a ...
+I want ...
+So that ...
+
+## Scope
+
+## Out Of Scope
+
+## Acceptance Criteria
+-
+
+## Dependencies
+
+## UX / Analytics Notes
+
+## Edge Cases
+```
+""",
+    "[AI] Epic Template": """# Epic Template
+
+This page is strict project knowledge for Epic work items in AIGILE.
+
+## Required Fields
+
+- Product goal.
+- Business outcome.
+- Target users.
+- Scope boundaries.
+- Child features / stories.
+- Key risks.
+- Dependencies.
+- Release assumptions.
+- Success metrics.
+
+## AI Review Rules
+
+- If business outcome is missing, Product Manager Agent should mark yellow or red.
+- If architecture or integration boundaries are unclear, Architect Agent should mark yellow.
+- If release assumptions are missing, Delivery Manager Agent should mark yellow.
+- If security impact is unknown for auth, data, or access features, Security Engineer Agent should call it out.
+
+## Recommended Plane Description
+
+```text
+## Product Goal
+
+## Business Outcome
+
+## Scope
+
+## Out Of Scope
+
+## Child Work Items
+
+## Risks
+
+## Dependencies
+
+## Success Metrics
+
+## Release Notes
+```
+""",
+    "[AI] Agent Response Rules": """# Agent Response Rules
+
+This page is strict project knowledge for how AIGILE agents should respond in Plane and Mattermost.
+
+## General Style
+
+- Answer in Russian by default.
+- Be concise first, detailed only when asked.
+- Do not expose stack traces, raw prompts, or internal tool errors to the user.
+- If context is missing, say what is missing and what to add.
+- Prefer clear delivery language over abstract AI reasoning.
+
+## Mattermost Task Thread Format
+
+- Keep visible answers short.
+- Mention the task key when useful.
+- Use bullets for actions, risks, and acceptance criteria.
+- If proposing a Plane update, create a draft and wait for approval.
+- Approval commands: `y` or `да`.
+- Rejection commands: `n` or `нет`.
+
+## Plane Comment Format
+
+Use short comments:
+
+```text
+Пользователь: Mattermost task thread
+Запрос: ...
+Изменение: ...
+```
+
+## AI Review Status Rules
+
+- Green: task is clear enough for the agent role.
+- Yellow: task can move forward but should be clarified.
+- Red: task has blockers, contradictions, missing critical data, or cannot be implemented/tested safely.
+
+## Safety Rules
+
+- Never update Plane without explicit approval.
+- Never delete user content.
+- Do not overwrite the whole task description for AI suggestions.
+- `!ac` may update only the Acceptance Criteria block and must mark new lines with `[AI]`.
+"""
+}
+
+
 def find_plane_pages_project() -> Project:
     return Project.objects.select_related("workspace").get(
         workspace__slug=PLANE_PAGES_WORKSPACE_SLUG,
@@ -1478,29 +1673,42 @@ def content_hash(text: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def ensure_agent_rules_page(project: Project) -> Page:
+def ensure_project_knowledge_page(project: Project, title: str, markdown: str) -> Page:
     existing_link = (
         ProjectPage.objects.select_related("page")
         .filter(
             workspace=project.workspace,
             project=project,
-            page__name=AGENT_RULES_PAGE_TITLE,
+            page__name=title,
             page__deleted_at__isnull=True,
             page__archived_at__isnull=True,
             deleted_at__isnull=True,
         )
         .first()
     )
-    if existing_link:
-        return existing_link.page
-
     owner = getattr(project, "project_lead", None) or getattr(project, "created_by", None) or getattr(project.workspace, "owner", None)
+    if existing_link:
+        page = existing_link.page
+        changed_fields = []
+        if not is_plane_page_public(page):
+            page.access = 0
+            changed_fields.append("access")
+        if not page_body_text(page):
+            page.description_html = markdown_to_basic_html(markdown)
+            page.description_stripped = markdown
+            page.description_json = text_to_description_json(markdown)
+            page.updated_by = owner
+            changed_fields.extend(["description_html", "description_stripped", "description_json", "updated_by"])
+        if changed_fields:
+            page.save(update_fields=sorted(set(changed_fields)))
+        return page
+
     page = Page.objects.create(
         workspace=project.workspace,
-        name=AGENT_RULES_PAGE_TITLE,
-        description_html=markdown_to_basic_html(AGENT_RULES_PAGE_MARKDOWN),
-        description_stripped=AGENT_RULES_PAGE_MARKDOWN,
-        description_json=text_to_description_json(AGENT_RULES_PAGE_MARKDOWN),
+        name=title,
+        description_html=markdown_to_basic_html(markdown),
+        description_stripped=markdown,
+        description_json=text_to_description_json(markdown),
         owned_by=owner,
         access=0,
         created_by=owner,
@@ -1514,6 +1722,13 @@ def ensure_agent_rules_page(project: Project) -> Page:
         updated_by=owner,
     )
     return page
+
+
+def ensure_plane_knowledge_templates(project: Project) -> list[Page]:
+    return [
+        ensure_project_knowledge_page(project, title, markdown)
+        for title, markdown in PLANE_KNOWLEDGE_TEMPLATE_PAGES.items()
+    ]
 
 
 def plane_page_metadata(project: Project, page: Page, text: str) -> dict:
@@ -1546,7 +1761,7 @@ def sync_plane_pages_to_rag(payload: dict | None = None) -> dict:
     started = time.time()
     project = find_plane_pages_project()
     if PLANE_PAGES_BOOTSTRAP_RULES:
-        ensure_agent_rules_page(project)
+        ensure_plane_knowledge_templates(project)
 
     links = (
         ProjectPage.objects.select_related("page")
@@ -1916,7 +2131,9 @@ def load_fresh_task_graph(context: dict) -> dict:
 
 def generate_task_chat_reply(context: dict, user_message: str, thread_history: str) -> str:
     graph = load_fresh_task_graph(context)
-    issue = (graph.get("current") or context.get("issue") or {})
+    issue = dict(graph.get("current") or context.get("issue") or {})
+    if graph.get("latest_review") and "latest_review" not in issue:
+        issue["latest_review"] = graph.get("latest_review")
     project_pages_context = read_project_pages_context(
         build_task_chat_project_pages_query(issue, user_message, thread_history),
         limit=8,
