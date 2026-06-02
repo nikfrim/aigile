@@ -28,6 +28,30 @@ Updated: 2026-05-27
 - The dashboard checks AIGILE backend, Plane database, Plane web, Mattermost, n8n, Ollama, RAG backend, Qdrant, and Open WebUI.
 - The dashboard is a pre-smoke-test step: if it is degraded, the failing service should be fixed before running longer product scenarios.
 
+## Delivery Intelligence Dashboard
+
+- AIGILE backend exposes a delivery management dashboard at `http://localhost:8091/delivery-dashboard`.
+- Machine-readable report is available at `http://localhost:8091/api/delivery-intelligence`.
+- The dashboard is the Morning Delivery Brief for a Product / Delivery Manager.
+- It uses real available AIGILE signals:
+  - Plane issues;
+  - latest AI Review history;
+  - AI labels and review statuses;
+  - apply history when available;
+  - module and cycle links when available.
+- MVP blocks:
+  - Morning Brief Summary;
+  - Delivery Health;
+  - Top Risks;
+  - Blockers & Impediments;
+  - Requirement Quality;
+  - Team / Module Signals;
+  - Decisions Needed;
+  - Changes Since Yesterday;
+  - Suggested Actions for Today.
+- Historical comparison is explicitly marked unavailable until snapshot history exists.
+- The dashboard does not replace the health index: health index is technical readiness, Delivery Intelligence is management readiness.
+
 ## Live Demo Seed / Reset
 
 - AIGILE has reproducible live demo work items for interviews and product demos.

@@ -31,6 +31,10 @@ Status: in progress
   - `.\reset-demo.ps1`;
   - backend endpoints `POST /api/demo/seed` and `POST /api/demo/reset`;
   - four reproducible `[DEMO]` work items for Story, Bug, Epic, and Tech Debt review scenarios.
+- Delivery Intelligence Dashboard:
+  - `http://localhost:8091/delivery-dashboard`;
+  - JSON report at `http://localhost:8091/api/delivery-intelligence`;
+  - Morning Brief, Delivery Health, Top Risks, Blockers, Requirement Quality, Module Signals, Decisions Needed, and Suggested Actions.
 
 ### Next
 

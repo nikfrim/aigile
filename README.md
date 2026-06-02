@@ -18,6 +18,7 @@ Local knowledge artifacts for this version:
 - Mattermost: http://localhost:8065
 - n8n: http://localhost:5678
 - AIGILE backend: http://localhost:8091
+- Delivery Intelligence Dashboard: http://localhost:8091/delivery-dashboard
 - AIGILE RAG backend: http://localhost:8092
 - Qdrant: http://localhost:6333
 - Ollama API: http://localhost:11434
@@ -200,6 +201,42 @@ Human-readable local status page:
 ```text
 http://localhost:8091/dashboard
 ```
+
+## Delivery Intelligence Dashboard
+
+Management morning brief:
+
+```text
+http://localhost:8091/delivery-dashboard
+```
+
+Machine-readable report:
+
+```text
+http://localhost:8091/api/delivery-intelligence
+```
+
+Use it after the health dashboard when you want to show delivery-level signals:
+
+- overall delivery status;
+- reviewed vs unreviewed work items;
+- green/yellow/red AI Review counts;
+- top risks from AI review findings;
+- blockers and unresolved red items;
+- requirement quality signals;
+- module signals;
+- decisions needed;
+- suggested actions for today.
+
+The dashboard is intentionally honest: unavailable historical comparison is shown as unavailable instead of being faked.
+
+Manual check:
+
+1. Open http://localhost:8091/dashboard and confirm services are OK.
+2. Run `.\reset-demo.ps1` if you need predictable demo issues.
+3. Open http://localhost:8091/delivery-dashboard.
+4. Confirm Morning Brief, Delivery Health, Top Risks, Requirement Quality, Decisions Needed, and Suggested Actions are visible.
+5. Open http://localhost:8091/api/delivery-intelligence and confirm JSON returns `ok: true`.
 
 Machine-readable status:
 

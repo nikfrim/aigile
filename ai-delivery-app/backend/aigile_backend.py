@@ -207,6 +207,21 @@ def read_review_history(issue_key: str | None = None, limit: int = 20) -> list[d
     return reviews[-limit:]
 
 
+def read_apply_history(limit: int = 200) -> list[dict]:
+    if not APPLY_HISTORY_PATH.exists():
+        return []
+    events = []
+    with APPLY_HISTORY_PATH.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return events[-limit:]
+
+
 def find_review_history_item(issue_key: str, review_id: str) -> dict | None:
     for review in reversed(read_review_history(issue_key, limit=1000)):
         if review.get("review_id") == review_id:
@@ -357,6 +372,511 @@ def build_health_report() -> dict:
         "services_down": down_count,
         "services": services,
     }
+
+
+def issue_key(issue: Issue) -> str:
+    return f"{issue.project.identifier}-{issue.sequence_id}"
+
+
+def issue_url(issue: Issue) -> str:
+    return f"http://localhost:8080/{issue.workspace.slug}/browse/{issue_key(issue)}"
+
+
+def latest_reviews_by_issue(limit: int = 2000) -> dict[str, dict]:
+    latest = {}
+    for review in read_review_history(limit=limit):
+        key = review.get("issue_key")
+        if key:
+            latest[key] = review
+    return latest
+
+
+def issue_has_acceptance_criteria(issue: Issue) -> bool:
+    text = (issue.description_stripped or strip_tags(issue.description_html or "") or "").lower()
+    return any(marker in text for marker in ["acceptance criteria", "acceptance criterion", "критерии приемки", "критерии приёмки"])
+
+
+def issue_module_names(issue: Issue) -> list[str]:
+    links = ModuleIssue.objects.select_related("module").filter(issue=issue, deleted_at__isnull=True)
+    return [link.module.name for link in links if getattr(link, "module", None)]
+
+
+def issue_cycle_names(issue: Issue) -> list[str]:
+    links = CycleIssue.objects.select_related("cycle").filter(issue=issue, deleted_at__isnull=True)
+    return [link.cycle.name for link in links if getattr(link, "cycle", None)]
+
+
+def review_findings(review: dict) -> list[dict]:
+    findings = []
+    for agent in review.get("agents") or []:
+        for finding in agent.get("findings") or []:
+            if not isinstance(finding, dict):
+                continue
+            findings.append({
+                "agent": agent.get("agent_name") or "AI Agent",
+                "status": agent.get("status") or review.get("overall_status") or "unknown",
+                "severity": finding.get("severity") or "medium",
+                "title": finding.get("title") or "AI review finding",
+                "description": finding.get("description") or "",
+                "recommendation": finding.get("recommendation") or "",
+                "can_be_applied": bool(finding.get("can_be_applied")),
+            })
+    return findings
+
+
+def build_delivery_intelligence_report() -> dict:
+    close_old_connections()
+    project = find_demo_project()
+    reviews = latest_reviews_by_issue()
+    apply_events = read_apply_history(limit=500)
+    issues = list(
+        Issue.objects.select_related("workspace", "project", "state", "type")
+        .prefetch_related("labels")
+        .filter(workspace=project.workspace, project=project, deleted_at__isnull=True, archived_at__isnull=True)
+        .order_by("-updated_at")[:250]
+    )
+    reviewed = []
+    unreviewed = []
+    status_counts = {"green": 0, "yellow": 0, "red": 0, "unknown": 0}
+    top_risks = []
+    blockers = []
+    requirement_quality = {
+        "without_acceptance_criteria": [],
+        "without_type_label": [],
+        "missing_info": [],
+        "yellow_red_qa_review": [],
+        "risks_or_dependencies_detected": [],
+    }
+    module_signals: dict[str, dict] = {}
+    decisions_needed = []
+
+    for issue in issues:
+        key = issue_key(issue)
+        labels = list(issue.labels.filter(deleted_at__isnull=True).values_list("name", flat=True))
+        review = reviews.get(key)
+        item = {
+            "key": key,
+            "title": issue.name,
+            "url": issue_url(issue),
+            "state": issue.state.name if issue.state else "",
+            "state_group": issue.state.group if issue.state else "",
+            "priority": issue.priority,
+            "labels": labels,
+            "modules": issue_module_names(issue),
+            "cycles": issue_cycle_names(issue),
+            "review": review,
+        }
+        if review:
+            reviewed.append(item)
+            status = review.get("overall_status") or "unknown"
+            status_counts[status if status in status_counts else "unknown"] += 1
+        else:
+            unreviewed.append(item)
+
+        if not issue_has_acceptance_criteria(issue):
+            requirement_quality["without_acceptance_criteria"].append(item)
+        if not any(canonical_issue_type(label) for label in labels):
+            requirement_quality["without_type_label"].append(item)
+
+        if review:
+            findings = review_findings(review)
+            red_findings = [finding for finding in findings if finding["status"] == "red" or finding["severity"] == "high"]
+            qa_findings = [finding for finding in findings if "QA" in finding["agent"] and review.get("overall_status") in {"yellow", "red"}]
+            risk_findings = [
+                finding for finding in findings
+                if any(token in f"{finding['title']} {finding['description']} {finding['recommendation']}".lower() for token in ["risk", "dependency", "blocker", "rollback", "security"])
+            ]
+            if red_findings:
+                blockers.append({**item, "reason": red_findings[0]["title"], "source": "AI Review"})
+            if qa_findings:
+                requirement_quality["yellow_red_qa_review"].append(item)
+            if risk_findings:
+                requirement_quality["risks_or_dependencies_detected"].append(item)
+            if review.get("overall_status") in {"yellow", "red"} and findings:
+                requirement_quality["missing_info"].append(item)
+            for finding in findings:
+                if finding["severity"] == "high" or finding["status"] == "red" or "risk" in f"{finding['title']} {finding['description']}".lower():
+                    top_risks.append({
+                        "risk": finding["title"],
+                        "description": finding["description"],
+                        "severity": finding["severity"],
+                        "source": "AI Review",
+                        "agent": finding["agent"],
+                        "issue_key": key,
+                        "issue_title": issue.name,
+                        "issue_url": issue_url(issue),
+                        "module": ", ".join(item["modules"]) or "Not available",
+                        "suggested_action": finding["recommendation"] or "Review with owner.",
+                    })
+            if review.get("overall_status") == "red":
+                decisions_needed.append({
+                    "decision": f"Resolve red AI review for {key}",
+                    "why": "A red review means the task may be blocked, contradictory, or missing critical delivery information.",
+                    "issue_key": key,
+                    "issue_url": issue_url(issue),
+                    "recommended_owner": "Delivery Manager / task owner",
+                    "action": "Open the issue, inspect findings, and decide whether to refine, split, or park the task.",
+                })
+
+        for module in item["modules"] or ["No module"]:
+            signal = module_signals.setdefault(module, {"module": module, "green": 0, "yellow": 0, "red": 0, "unreviewed": 0, "blockers": 0})
+            if review:
+                status = review.get("overall_status") or "unknown"
+                if status in {"green", "yellow", "red"}:
+                    signal[status] += 1
+                if status == "red":
+                    signal["blockers"] += 1
+            else:
+                signal["unreviewed"] += 1
+
+    red = status_counts["red"]
+    yellow = status_counts["yellow"]
+    overall = "red" if red else "yellow" if yellow or unreviewed else "green"
+    main_findings = []
+    if red:
+        main_findings.append(f"{red} reviewed task(s) have red AI review.")
+    if yellow:
+        main_findings.append(f"{yellow} reviewed task(s) have yellow AI review.")
+    if unreviewed:
+        main_findings.append(f"{len(unreviewed)} task(s) have no AI review yet.")
+    if requirement_quality["without_acceptance_criteria"]:
+        main_findings.append(f"{len(requirement_quality['without_acceptance_criteria'])} task(s) may be missing acceptance criteria.")
+    if not main_findings:
+        main_findings.append("Reviewed delivery scope looks healthy based on available AIGILE signals.")
+
+    suggested_actions = []
+    if blockers:
+        suggested_actions.append(f"Start with {blockers[0]['key']}: unresolved red review needs attention.")
+    if requirement_quality["without_type_label"]:
+        suggested_actions.append("Add type labels to untyped tasks so Agent Router can select the right review agents.")
+    if requirement_quality["without_acceptance_criteria"]:
+        suggested_actions.append("Run refinement on tasks missing acceptance criteria.")
+    if top_risks:
+        suggested_actions.append(f"Assign an owner for risk: {top_risks[0]['risk']}.")
+    if unreviewed:
+        suggested_actions.append("Run AI analysis for the highest-priority unreviewed tasks.")
+    if not suggested_actions:
+        suggested_actions.append("No urgent delivery action detected from available data.")
+
+    return {
+        "ok": True,
+        "created_at": utc_now_iso(),
+        "project": project.name,
+        "project_identifier": project.identifier,
+        "overall_status": overall,
+        "morning_brief": {
+            "status": overall,
+            "findings": main_findings[:5],
+            "attention_today": suggested_actions[:3],
+            "mode": "rule_based",
+        },
+        "delivery_health": {
+            "overall": overall,
+            "reviewed_total": len(reviewed),
+            "unreviewed_total": len(unreviewed),
+            "status_counts": status_counts,
+            "red_findings_total": len(blockers),
+            "waiting_human_approval": sum(1 for event in apply_events if event.get("status") in {"pending", "draft"}),
+        },
+        "top_risks": top_risks[:10],
+        "blockers": blockers[:10],
+        "requirement_quality": {
+            key: {"count": len(value), "items": value[:10]}
+            for key, value in requirement_quality.items()
+        },
+        "module_signals": sorted(module_signals.values(), key=lambda item: (item["red"], item["yellow"], item["unreviewed"]), reverse=True),
+        "decisions_needed": decisions_needed[:10],
+        "changes_since_yesterday": {
+            "available": False,
+            "message": "Historical comparison is not available yet.",
+            "structure_ready": True,
+        },
+        "suggested_actions": suggested_actions[:8],
+        "data_sources": {
+            "plane_issues": True,
+            "ai_review_history": REVIEW_HISTORY_PATH.exists(),
+            "ai_apply_history": APPLY_HISTORY_PATH.exists(),
+            "mattermost_task_thread_memory": TASK_CHAT_CONTEXT_PATH.exists(),
+            "rag_decision_log": "Not available in this dashboard MVP",
+        },
+    }
+
+
+def render_issue_link(item: dict) -> str:
+    return f'<a href="{escape(str(item.get("url") or "#"))}" target="_blank">{escape(str(item.get("key") or ""))}</a>'
+
+
+def status_badge(status: str) -> str:
+    status = (status or "unknown").lower()
+    cls = status if status in {"green", "yellow", "red"} else "unknown"
+    return f'<span class="badge {cls}">{escape(status.upper())}</span>'
+
+
+def render_delivery_intelligence_dashboard(report: dict) -> str:
+    health = report.get("delivery_health") or {}
+    counts = health.get("status_counts") or {}
+    brief = report.get("morning_brief") or {}
+    rq = report.get("requirement_quality") or {}
+
+    def list_items(items: list[str]) -> str:
+        return "".join(f"<li>{escape(str(item))}</li>" for item in items) or "<li>Nothing urgent detected from available data.</li>"
+
+    def issue_rows(items: list[dict], empty: str, include_reason: bool = False) -> str:
+        if not items:
+            return f'<tr><td colspan="{4 if include_reason else 3}" class="muted">{escape(empty)}</td></tr>'
+        rows = []
+        for item in items:
+            reason = f"<td>{escape(str(item.get('reason') or item.get('source') or ''))}</td>" if include_reason else ""
+            rows.append(
+                f"""
+                <tr>
+                  <td>{render_issue_link(item)}</td>
+                  <td>{escape(str(item.get("title") or item.get("issue_title") or ""))}</td>
+                  <td>{escape(", ".join(item.get("modules") or []) or str(item.get("module") or "Not available"))}</td>
+                  {reason}
+                </tr>
+                """
+            )
+        return "".join(rows)
+
+    risk_rows = []
+    for risk in report.get("top_risks") or []:
+        risk_rows.append(
+            f"""
+            <tr>
+              <td>{escape(str(risk.get("risk") or ""))}<div class="muted small">{escape(str(risk.get("description") or ""))}</div></td>
+              <td>{escape(str(risk.get("severity") or "medium")).upper()}</td>
+              <td>{escape(str(risk.get("agent") or risk.get("source") or ""))}</td>
+              <td><a href="{escape(str(risk.get("issue_url") or "#"))}" target="_blank">{escape(str(risk.get("issue_key") or ""))}</a></td>
+              <td>{escape(str(risk.get("suggested_action") or ""))}</td>
+            </tr>
+            """
+        )
+    if not risk_rows:
+        risk_rows.append('<tr><td colspan="5" class="muted">No explicit high risks found in available AI reviews.</td></tr>')
+
+    module_rows = []
+    for signal in report.get("module_signals") or []:
+        module_rows.append(
+            f"""
+            <tr>
+              <td>{escape(str(signal.get("module") or "No module"))}</td>
+              <td>{escape(str(signal.get("red") or 0))}</td>
+              <td>{escape(str(signal.get("yellow") or 0))}</td>
+              <td>{escape(str(signal.get("green") or 0))}</td>
+              <td>{escape(str(signal.get("unreviewed") or 0))}</td>
+            </tr>
+            """
+        )
+    if not module_rows:
+        module_rows.append('<tr><td colspan="5" class="muted">Module signal data is not available.</td></tr>')
+
+    decision_rows = []
+    for decision in report.get("decisions_needed") or []:
+        decision_rows.append(
+            f"""
+            <tr>
+              <td>{escape(str(decision.get("decision") or ""))}<div class="muted small">{escape(str(decision.get("why") or ""))}</div></td>
+              <td><a href="{escape(str(decision.get("issue_url") or "#"))}" target="_blank">{escape(str(decision.get("issue_key") or ""))}</a></td>
+              <td>{escape(str(decision.get("recommended_owner") or ""))}</td>
+              <td>{escape(str(decision.get("action") or ""))}</td>
+            </tr>
+            """
+        )
+    if not decision_rows:
+        decision_rows.append('<tr><td colspan="4" class="muted">No management decisions detected from available data.</td></tr>')
+
+    data_sources = report.get("data_sources") or {}
+    source_rows = "".join(
+        f"<tr><td>{escape(str(name))}</td><td>{escape(str(value))}</td></tr>"
+        for name, value in data_sources.items()
+    )
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AIGILE Delivery Intelligence</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      --bg: #101214;
+      --panel: #171a1f;
+      --panel-2: #1d222b;
+      --line: #2b3038;
+      --text: #e7e9ee;
+      --muted: #a1a8b3;
+      --green: #24c36b;
+      --yellow: #f0c94a;
+      --red: #ff5d5d;
+      --blue: #78b7ff;
+    }}
+    body {{
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }}
+    main {{
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 32px 20px 56px;
+    }}
+    header {{
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 24px;
+      margin-bottom: 22px;
+    }}
+    h1 {{ margin: 0 0 8px; font-size: 30px; letter-spacing: 0; }}
+    h2 {{ margin: 0 0 12px; font-size: 18px; }}
+    p {{ margin: 0; color: var(--muted); }}
+    a {{ color: var(--blue); text-decoration: none; }}
+    .grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }}
+    .card, section {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+    }}
+    .card span {{ color: var(--muted); font-size: 13px; }}
+    .card strong {{ display: block; margin-top: 8px; font-size: 28px; }}
+    .layout {{ display: grid; grid-template-columns: 1.25fr 1fr; gap: 14px; margin-bottom: 14px; }}
+    section {{ margin-bottom: 14px; }}
+    ul {{ margin: 8px 0 0 20px; padding: 0; color: var(--text); }}
+    li {{ margin: 6px 0; }}
+    table {{ width: 100%; border-collapse: collapse; overflow: hidden; }}
+    th, td {{ padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; font-size: 13px; }}
+    th {{ color: var(--muted); font-weight: 700; }}
+    tr:last-child td {{ border-bottom: none; }}
+    .badge {{
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      border: 1px solid var(--muted);
+      color: var(--muted);
+      padding: 4px 9px;
+      font-size: 12px;
+      font-weight: 800;
+    }}
+    .badge.green {{ color: var(--green); border-color: var(--green); }}
+    .badge.yellow {{ color: var(--yellow); border-color: var(--yellow); }}
+    .badge.red {{ color: var(--red); border-color: var(--red); }}
+    .muted {{ color: var(--muted); }}
+    .small {{ font-size: 12px; margin-top: 4px; }}
+    .actions {{ display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }}
+    .button {{
+      display: inline-flex;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 9px 12px;
+      font-size: 14px;
+    }}
+    @media (max-width: 900px) {{
+      .grid, .layout {{ grid-template-columns: 1fr; }}
+      header {{ align-items: flex-start; flex-direction: column; }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>AIGILE Delivery Intelligence</h1>
+        <p>Morning delivery brief for {escape(str(report.get("project") or "AIGILE"))}. Updated: {escape(str(report.get("created_at") or ""))}</p>
+      </div>
+      {status_badge(str(report.get("overall_status") or "unknown"))}
+    </header>
+
+    <div class="grid">
+      <div class="card"><span>Reviewed</span><strong>{escape(str(health.get("reviewed_total") or 0))}</strong></div>
+      <div class="card"><span>Red / Yellow / Green</span><strong>{escape(str(counts.get("red") or 0))} / {escape(str(counts.get("yellow") or 0))} / {escape(str(counts.get("green") or 0))}</strong></div>
+      <div class="card"><span>No AI Review</span><strong>{escape(str(health.get("unreviewed_total") or 0))}</strong></div>
+      <div class="card"><span>Waiting Approval</span><strong>{escape(str(health.get("waiting_human_approval") or 0))}</strong></div>
+    </div>
+
+    <div class="layout">
+      <section>
+        <h2>Morning Brief Summary</h2>
+        <p>Mode: {escape(str(brief.get("mode") or "rule_based"))}. AI inference is not required for this fast management brief.</p>
+        <ul>{list_items(brief.get("findings") or [])}</ul>
+      </section>
+      <section>
+        <h2>Suggested Actions for Today</h2>
+        <ul>{list_items(report.get("suggested_actions") or [])}</ul>
+      </section>
+    </div>
+
+    <section>
+      <h2>Top Risks</h2>
+      <table>
+        <thead><tr><th>Risk</th><th>Severity</th><th>Source</th><th>Issue</th><th>Suggested action</th></tr></thead>
+        <tbody>{''.join(risk_rows)}</tbody>
+      </table>
+    </section>
+
+    <div class="layout">
+      <section>
+        <h2>Blockers & Impediments</h2>
+        <table>
+          <thead><tr><th>Issue</th><th>Title</th><th>Module</th><th>Reason</th></tr></thead>
+          <tbody>{issue_rows(report.get("blockers") or [], "No unresolved red issues found.", include_reason=True)}</tbody>
+        </table>
+      </section>
+      <section>
+        <h2>Requirement Quality</h2>
+        <table>
+          <thead><tr><th>Signal</th><th>Count</th></tr></thead>
+          <tbody>
+            <tr><td>Without acceptance criteria</td><td>{escape(str((rq.get("without_acceptance_criteria") or {}).get("count") or 0))}</td></tr>
+            <tr><td>Without type label</td><td>{escape(str((rq.get("without_type_label") or {}).get("count") or 0))}</td></tr>
+            <tr><td>Missing info in AI review</td><td>{escape(str((rq.get("missing_info") or {}).get("count") or 0))}</td></tr>
+            <tr><td>Yellow/red QA review</td><td>{escape(str((rq.get("yellow_red_qa_review") or {}).get("count") or 0))}</td></tr>
+            <tr><td>Risks/dependencies detected</td><td>{escape(str((rq.get("risks_or_dependencies_detected") or {}).get("count") or 0))}</td></tr>
+          </tbody>
+        </table>
+      </section>
+    </div>
+
+    <section>
+      <h2>Team / Module Signals</h2>
+      <table>
+        <thead><tr><th>Module</th><th>Red</th><th>Yellow</th><th>Green</th><th>No review</th></tr></thead>
+        <tbody>{''.join(module_rows)}</tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Decisions Needed</h2>
+      <table>
+        <thead><tr><th>Decision</th><th>Issue</th><th>Owner</th><th>Recommended action</th></tr></thead>
+        <tbody>{''.join(decision_rows)}</tbody>
+      </table>
+    </section>
+
+    <div class="layout">
+      <section>
+        <h2>Changes Since Yesterday</h2>
+        <p>{escape(str((report.get("changes_since_yesterday") or {}).get("message") or "Not available"))}</p>
+      </section>
+      <section>
+        <h2>Data Sources</h2>
+        <table><tbody>{source_rows}</tbody></table>
+      </section>
+    </div>
+
+    <div class="actions">
+      <a class="button" href="/dashboard">Health dashboard</a>
+      <a class="button" href="/api/delivery-intelligence">JSON report</a>
+      <a class="button" href="http://localhost:8080/aigile/projects/882d9973-7e7d-4ad7-ba0f-df2f1c28e825/issues/" target="_blank">Open Plane board</a>
+    </div>
+  </main>
+</body>
+</html>"""
 
 
 def render_health_dashboard(report: dict) -> str:
@@ -3290,6 +3810,14 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path in {"/dashboard", "/health-dashboard"}:
             report = build_health_report()
             html_response(self, 200, render_health_dashboard(report))
+            return
+        if parsed.path in {"/delivery-dashboard", "/morning-brief"}:
+            report = build_delivery_intelligence_report()
+            html_response(self, 200, render_delivery_intelligence_dashboard(report))
+            return
+        if parsed.path == "/api/delivery-intelligence":
+            report = build_delivery_intelligence_report()
+            json_response(self, 200, report)
             return
         if parsed.path == "/api/resolve-issue":
             try:

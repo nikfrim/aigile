@@ -170,6 +170,48 @@ class DemoSeedTests(unittest.TestCase):
         self.assertEqual(aigile_backend.DEMO_TITLE_PREFIX, "[DEMO]")
 
 
+class DeliveryIntelligenceTests(unittest.TestCase):
+    def test_delivery_dashboard_render_contains_management_sections(self):
+        report = {
+            "created_at": "2026-06-02T08:00:00Z",
+            "project": "AIGILE Platform",
+            "overall_status": "yellow",
+            "morning_brief": {
+                "mode": "rule_based",
+                "findings": ["1 reviewed task has yellow AI review."],
+            },
+            "delivery_health": {
+                "reviewed_total": 1,
+                "unreviewed_total": 2,
+                "waiting_human_approval": 0,
+                "status_counts": {"green": 0, "yellow": 1, "red": 0},
+            },
+            "top_risks": [],
+            "blockers": [],
+            "requirement_quality": {
+                "without_acceptance_criteria": {"count": 2, "items": []},
+                "without_type_label": {"count": 1, "items": []},
+                "missing_info": {"count": 1, "items": []},
+                "yellow_red_qa_review": {"count": 1, "items": []},
+                "risks_or_dependencies_detected": {"count": 0, "items": []},
+            },
+            "module_signals": [],
+            "decisions_needed": [],
+            "changes_since_yesterday": {"message": "Historical comparison is not available yet."},
+            "suggested_actions": ["Run AI analysis for high-priority tasks."],
+            "data_sources": {"plane_issues": True},
+        }
+
+        html = aigile_backend.render_delivery_intelligence_dashboard(report)
+
+        self.assertIn("AIGILE Delivery Intelligence", html)
+        self.assertIn("Morning Brief Summary", html)
+        self.assertIn("Top Risks", html)
+        self.assertIn("Requirement Quality", html)
+        self.assertIn("Decisions Needed", html)
+        self.assertIn("/api/delivery-intelligence", html)
+
+
 class ReviewGateTests(unittest.TestCase):
     def test_detect_issue_type_from_type_label_title_and_fallback(self):
         self.assertEqual(aigile_backend.detect_issue_type({"type": "Story"}), "Story")
