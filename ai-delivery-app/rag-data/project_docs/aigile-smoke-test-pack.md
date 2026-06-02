@@ -49,6 +49,18 @@ If a new issue is used, add exactly one type label before running AI analysis.
 
 Expected result: every service needed for the MVP is reachable.
 
+Open the dashboard first:
+
+```text
+http://localhost:8091/dashboard
+```
+
+Machine-readable endpoint:
+
+```text
+http://localhost:8091/healthz
+```
+
 Manual checks:
 
 1. Open Plane: `http://localhost:8080`
@@ -66,6 +78,7 @@ Invoke-RestMethod -Uri "http://127.0.0.1:6333/collections"
 
 Pass:
 
+- The dashboard is green or clearly identifies the degraded service.
 - AIGILE backend returns healthy status.
 - RAG backend returns healthy status.
 - Qdrant returns a collections response.
@@ -370,6 +383,5 @@ A change passes smoke testing when:
 ## Current Known Gaps
 
 - This pack is manual-first.
-- The next step should add a small health dashboard and one-click smoke status.
+- The health dashboard exists; the next step is one-click smoke status where practical.
 - n8n workflow import/activation should still be checked manually if workflow JSON changes.
-

@@ -129,6 +129,34 @@ The pack covers:
 - Plane Pages sync;
 - git safety checks.
 
+## Health Dashboard
+
+Human-readable local status page:
+
+```text
+http://localhost:8091/dashboard
+```
+
+Machine-readable status:
+
+```text
+http://localhost:8091/healthz
+```
+
+The dashboard checks:
+
+- AIGILE backend;
+- Plane database;
+- Plane web;
+- Mattermost;
+- n8n;
+- Ollama;
+- AIGILE RAG backend;
+- Qdrant;
+- Open WebUI.
+
+Use this before the smoke test pack. If the dashboard is degraded, fix the failing service first.
+
 ## RAG Backend
 
 Source:

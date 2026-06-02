@@ -13,10 +13,12 @@ Status: in progress
 
 - Smoke test pack at `ai-delivery-app/rag-data/project_docs/aigile-smoke-test-pack.md`.
 - Manual verification flow for service health, Plane AI Review Gate, Mattermost task threads, chat-to-Plane approval, RAG `/kb`, document upload ingestion, Plane Pages sync, and git safety.
+- Local health dashboard at `http://localhost:8091/dashboard`.
+- Machine-readable health endpoint at `http://localhost:8091/healthz`.
+- Health checks for AIGILE backend, Plane database, Plane web, Mattermost, n8n, Ollama, RAG backend, Qdrant, and Open WebUI.
 
 ### Next
 
-- Add a lightweight health dashboard for local services.
 - Turn the manual smoke pack into a more automated status check where practical.
 
 ## 0.1.0 - Local AI Delivery MVP

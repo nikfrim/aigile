@@ -6,6 +6,7 @@ import hashlib
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -27,6 +28,10 @@ PORT = int(os.environ.get("AIGILE_BACKEND_PORT", "8091"))
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:7b-instruct")
 RAG_BACKEND_URL = os.environ.get("RAG_BACKEND_URL", "http://rag-backend:8092").rstrip("/")
+QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333").rstrip("/")
+N8N_INTERNAL_URL = os.environ.get("N8N_INTERNAL_URL", "http://n8n:5678").rstrip("/")
+PLANE_INTERNAL_URL = os.environ.get("PLANE_INTERNAL_URL", "http://plane-proxy").rstrip("/")
+OPEN_WEBUI_INTERNAL_URL = os.environ.get("OPEN_WEBUI_INTERNAL_URL", "http://open-webui:8080").rstrip("/")
 MATTERMOST_WEBHOOK_URL = os.environ["MATTERMOST_WEBHOOK_URL"]
 MATTERMOST_INTERNAL_URL = os.environ.get("MATTERMOST_INTERNAL_URL", "http://mattermost:8065").rstrip("/")
 MATTERMOST_PUBLIC_URL = os.environ.get("MATTERMOST_PUBLIC_URL", "http://localhost:8065").rstrip("/")
@@ -213,12 +218,335 @@ def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict) -
     handler.wfile.write(body)
 
 
+def html_response(handler: BaseHTTPRequestHandler, status: int, html: str) -> None:
+    body = html.encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
 def read_body(handler: BaseHTTPRequestHandler) -> dict:
     length = int(handler.headers.get("Content-Length", "0") or "0")
     if length == 0:
         return {}
     raw = handler.rfile.read(length).decode("utf-8")
     return json.loads(raw or "{}")
+
+
+def probe_http_service(service_id: str, name: str, url: str, timeout: float = 2.0, public_url: str | None = None) -> dict:
+    started = time.monotonic()
+    result = {
+        "id": service_id,
+        "name": name,
+        "kind": "http",
+        "url": public_url or url,
+        "internal_url": url,
+        "ok": False,
+        "status": "down",
+        "status_code": None,
+        "latency_ms": None,
+        "error": None,
+    }
+    try:
+        request = Request(url, headers={"User-Agent": "AIGILE-health-check/0.1"})
+        with urlopen(request, timeout=timeout) as response:
+            status_code = getattr(response, "status", None) or response.getcode()
+            response.read(512)
+        result["status_code"] = status_code
+        result["ok"] = 200 <= int(status_code) < 400
+        result["status"] = "ok" if result["ok"] else "warn"
+    except Exception as exc:
+        result["error"] = str(exc)
+    finally:
+        result["latency_ms"] = round((time.monotonic() - started) * 1000)
+    return result
+
+
+def probe_plane_database() -> dict:
+    started = time.monotonic()
+    result = {
+        "id": "plane_database",
+        "name": "Plane database",
+        "kind": "django",
+        "url": "postgresql://plane-db/plane",
+        "ok": False,
+        "status": "down",
+        "latency_ms": None,
+        "error": None,
+        "details": {},
+    }
+    try:
+        close_old_connections()
+        result["details"] = {
+            "projects": Project.objects.filter(deleted_at__isnull=True).count(),
+            "issues": Issue.objects.filter(deleted_at__isnull=True).count(),
+        }
+        result["ok"] = True
+        result["status"] = "ok"
+    except Exception as exc:
+        result["error"] = str(exc)
+    finally:
+        result["latency_ms"] = round((time.monotonic() - started) * 1000)
+    return result
+
+
+def build_health_report() -> dict:
+    self_service = {
+        "id": "aigile_backend",
+        "name": "AIGILE backend",
+        "kind": "self",
+        "url": "http://localhost:8091",
+        "ok": True,
+        "status": "ok",
+        "latency_ms": 0,
+        "details": {
+            "review_gate_enabled": REVIEW_GATE_ENABLED,
+            "task_chat_enabled": TASK_CHAT_THREAD_ENABLED,
+            "ollama_model": OLLAMA_MODEL,
+        },
+    }
+    checks = [
+        ("plane_database", probe_plane_database),
+        ("plane_web", lambda: probe_http_service("plane_web", "Plane web", f"{PLANE_INTERNAL_URL}/", public_url="http://localhost:8080")),
+        ("mattermost", lambda: probe_http_service("mattermost", "Mattermost", f"{MATTERMOST_INTERNAL_URL}/api/v4/system/ping", public_url=MATTERMOST_PUBLIC_URL)),
+        ("n8n", lambda: probe_http_service("n8n", "n8n", f"{N8N_INTERNAL_URL}/healthz", public_url="http://localhost:5678")),
+        ("ollama", lambda: probe_http_service("ollama", "Ollama", f"{OLLAMA_BASE_URL}/api/tags", public_url="http://localhost:11434")),
+        ("rag_backend", lambda: probe_http_service("rag_backend", "AIGILE RAG backend", f"{RAG_BACKEND_URL}/health", public_url="http://localhost:8092")),
+        ("qdrant", lambda: probe_http_service("qdrant", "Qdrant", f"{QDRANT_URL}/collections", public_url="http://localhost:6333")),
+        ("open_webui", lambda: probe_http_service("open_webui", "Open WebUI", f"{OPEN_WEBUI_INTERNAL_URL}/", public_url="http://localhost:3001")),
+    ]
+    by_id = {"aigile_backend": self_service}
+    with ThreadPoolExecutor(max_workers=len(checks)) as executor:
+        futures = {executor.submit(fn): service_id for service_id, fn in checks}
+        for future in as_completed(futures):
+            service_id = futures[future]
+            try:
+                by_id[service_id] = future.result()
+            except Exception as exc:
+                by_id[service_id] = {
+                    "id": service_id,
+                    "name": service_id.replace("_", " ").title(),
+                    "kind": "internal",
+                    "url": "",
+                    "ok": False,
+                    "status": "down",
+                    "latency_ms": 0,
+                    "error": str(exc),
+                }
+    order = ["aigile_backend"] + [service_id for service_id, _ in checks]
+    services = [by_id[service_id] for service_id in order]
+    ok_count = sum(1 for service in services if service.get("ok"))
+    down_count = len(services) - ok_count
+    return {
+        "ok": down_count == 0,
+        "status": "ok" if down_count == 0 else "degraded",
+        "created_at": utc_now_iso(),
+        "services_total": len(services),
+        "services_ok": ok_count,
+        "services_down": down_count,
+        "services": services,
+    }
+
+
+def render_health_dashboard(report: dict) -> str:
+    rows = []
+    for service in report.get("services", []):
+        status = service.get("status") or "down"
+        status_class = "ok" if service.get("ok") else "down"
+        details = service.get("details") or {}
+        detail_text = ", ".join(f"{escape(str(key))}: {escape(str(value))}" for key, value in details.items())
+        error = service.get("error") or ""
+        rows.append(
+            f"""
+            <tr>
+              <td><span class="dot {status_class}"></span>{escape(str(service.get("name") or service.get("id")))}</td>
+              <td><span class="badge {status_class}">{escape(str(status).upper())}</span></td>
+              <td>{escape(str(service.get("latency_ms") or 0))} ms</td>
+              <td><a href="{escape(str(service.get("url") or '#'))}" target="_blank">{escape(str(service.get("url") or ""))}</a></td>
+              <td>{detail_text or escape(str(error))}</td>
+            </tr>
+            """
+        )
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AIGILE Health Dashboard</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      --bg: #101214;
+      --panel: #171a1f;
+      --line: #2b3038;
+      --text: #e7e9ee;
+      --muted: #a1a8b3;
+      --ok: #24c36b;
+      --down: #ff5d5d;
+    }}
+    body {{
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }}
+    main {{
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+    }}
+    header {{
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 24px;
+    }}
+    h1 {{
+      font-size: 28px;
+      margin: 0 0 8px;
+      letter-spacing: 0;
+    }}
+    p {{
+      color: var(--muted);
+      margin: 0;
+    }}
+    .summary {{
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 18px;
+    }}
+    .metric {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px 16px;
+    }}
+    .metric strong {{
+      display: block;
+      font-size: 24px;
+      margin-top: 4px;
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }}
+    th, td {{
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+      font-size: 14px;
+    }}
+    th {{
+      color: var(--muted);
+      font-weight: 600;
+    }}
+    tr:last-child td {{
+      border-bottom: none;
+    }}
+    a {{
+      color: #78b7ff;
+      text-decoration: none;
+    }}
+    .dot {{
+      display: inline-block;
+      width: 9px;
+      height: 9px;
+      margin-right: 10px;
+      border-radius: 999px;
+      background: var(--down);
+    }}
+    .dot.ok {{
+      background: var(--ok);
+    }}
+    .badge {{
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      border: 1px solid var(--down);
+      color: var(--down);
+      padding: 3px 8px;
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .badge.ok {{
+      border-color: var(--ok);
+      color: var(--ok);
+    }}
+    .actions {{
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 18px;
+    }}
+    .button {{
+      border: 1px solid var(--line);
+      color: var(--text);
+      background: var(--panel);
+      border-radius: 8px;
+      padding: 9px 12px;
+    }}
+    @media (max-width: 760px) {{
+      header, .summary {{
+        display: block;
+      }}
+      .metric {{
+        margin-bottom: 10px;
+      }}
+      table, tbody, tr, td, th {{
+        display: block;
+      }}
+      thead {{
+        display: none;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>AIGILE Health Dashboard</h1>
+        <p>Local runtime status. Updated: {escape(str(report.get("created_at")))}</p>
+      </div>
+      <span class="badge {'ok' if report.get('ok') else 'down'}">{escape(str(report.get("status", "unknown")).upper())}</span>
+    </header>
+    <section class="summary">
+      <div class="metric">Services<strong>{escape(str(report.get("services_total")))}</strong></div>
+      <div class="metric">OK<strong>{escape(str(report.get("services_ok")))}</strong></div>
+      <div class="metric">Down / Warn<strong>{escape(str(report.get("services_down")))}</strong></div>
+    </section>
+    <table>
+      <thead>
+        <tr>
+          <th>Service</th>
+          <th>Status</th>
+          <th>Latency</th>
+          <th>Open</th>
+          <th>Details</th>
+        </tr>
+      </thead>
+      <tbody>
+        {''.join(rows)}
+      </tbody>
+    </table>
+    <div class="actions">
+      <a class="button" href="/healthz">JSON health</a>
+      <a class="button" href="/api/review-history">AI review history API</a>
+    </div>
+  </main>
+</body>
+</html>"""
 
 
 def issue_to_payload(issue: Issue) -> dict:
@@ -537,6 +865,14 @@ def scheduler_loop() -> None:
             logger.exception("Scheduled KB refresh failed")
             append_execution_log({"event": "knowledge_base_refresh", "status": "failure", "error": str(exc)})
             time.sleep(60)
+
+
+def initial_refresh_loop() -> None:
+    try:
+        refresh_knowledge_base()
+    except Exception as exc:
+        logger.exception("Initial KB refresh failed")
+        append_execution_log({"event": "knowledge_base_refresh", "status": "failure", "error": str(exc), "phase": "startup"})
 
 
 def ollama_chat(issue: dict, context: str) -> dict:
@@ -2425,6 +2761,14 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/health":
             json_response(self, 200, {"ok": True})
             return
+        if parsed.path == "/healthz":
+            report = build_health_report()
+            json_response(self, 200 if report.get("ok") else 503, report)
+            return
+        if parsed.path in {"/dashboard", "/health-dashboard"}:
+            report = build_health_report()
+            html_response(self, 200, render_health_dashboard(report))
+            return
         if parsed.path == "/api/resolve-issue":
             try:
                 payload = {k: v[0] for k, v in parse_qs(parsed.query).items()}
@@ -2521,7 +2865,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     ensure_dirs()
-    refresh_knowledge_base()
+    threading.Thread(target=initial_refresh_loop, daemon=True).start()
     threading.Thread(target=scheduler_loop, daemon=True).start()
     threading.Thread(target=task_chat_poll_loop, daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)

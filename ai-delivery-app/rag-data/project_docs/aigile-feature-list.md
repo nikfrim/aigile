@@ -21,6 +21,13 @@ Updated: 2026-05-27
 - It covers service health, Plane AI Review Gate, Mattermost task threads, chat-to-Plane approval, `/kb`, document upload ingestion, Plane Pages sync, and git safety checks.
 - It is intended to become the basis for a future health dashboard and automated smoke status.
 
+## Health Dashboard
+
+- AIGILE backend exposes a local health dashboard at `http://localhost:8091/dashboard`.
+- Machine-readable health is available at `http://localhost:8091/healthz`.
+- The dashboard checks AIGILE backend, Plane database, Plane web, Mattermost, n8n, Ollama, RAG backend, Qdrant, and Open WebUI.
+- The dashboard is a pre-smoke-test step: if it is degraded, the failing service should be fixed before running longer product scenarios.
+
 ## Plane Structure
 
 - Projects were corrected from wrong type-based projects to domain-oriented projects:

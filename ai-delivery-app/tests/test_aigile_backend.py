@@ -112,6 +112,49 @@ class ManualTriggerTests(unittest.TestCase):
                 aigile_backend.run_manual_trigger({"issue_key": "AIGILE-1"})
 
 
+class HealthDashboardTests(unittest.TestCase):
+    def test_http_probe_marks_2xx_service_ok(self):
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def read(self, *args):
+                return b"ok"
+
+            def getcode(self):
+                return 200
+
+        with mock.patch.object(aigile_backend, "urlopen", return_value=FakeResponse()):
+            result = aigile_backend.probe_http_service("svc", "Service", "http://service/health")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["status_code"], 200)
+
+    def test_health_report_returns_degraded_when_any_service_is_down(self):
+        ok_service = {"id": "svc", "name": "Service", "ok": True, "status": "ok"}
+        down_service = {"id": "svc-down", "name": "Down", "ok": False, "status": "down"}
+
+        with (
+            mock.patch.object(aigile_backend, "probe_plane_database", return_value=ok_service),
+            mock.patch.object(
+                aigile_backend,
+                "probe_http_service",
+                side_effect=[ok_service, ok_service, ok_service, ok_service, down_service, ok_service, ok_service],
+            ),
+        ):
+            report = aigile_backend.build_health_report()
+
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["status"], "degraded")
+        self.assertEqual(report["services_down"], 1)
+
+
 class ReviewGateTests(unittest.TestCase):
     def test_detect_issue_type_from_type_label_title_and_fallback(self):
         self.assertEqual(aigile_backend.detect_issue_type({"type": "Story"}), "Story")
