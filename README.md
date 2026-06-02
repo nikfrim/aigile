@@ -2,13 +2,14 @@
 
 Fully local MVP for AI-assisted delivery on Windows + Docker Desktop.
 
-Current local version: `AIGILE 0.1.0`.
+Current local version: `AIGILE 0.1.1-dev`.
 
 Local knowledge artifacts for this version:
 
 - `ai-delivery-app/rag-data/project_docs/aigile-feature-list.md`
 - `ai-delivery-app/rag-data/project_docs/aigile-release-notes.md`
 - `ai-delivery-app/rag-data/project_docs/aigile-0.1.0-system-summary.md`
+- `ai-delivery-app/rag-data/project_docs/aigile-smoke-test-pack.md`
 - `ai-delivery-app/rag-data/decision_log/aigile-0.1.0-product-decisions.md`
 
 ## Services
@@ -93,10 +94,40 @@ Version `0.1.0` introduced these project documents:
 ai-delivery-app/rag-data/project_docs/aigile-feature-list.md
 ai-delivery-app/rag-data/project_docs/aigile-release-notes.md
 ai-delivery-app/rag-data/project_docs/aigile-0.1.0-system-summary.md
+ai-delivery-app/rag-data/project_docs/aigile-smoke-test-pack.md
 ai-delivery-app/rag-data/decision_log/aigile-0.1.0-product-decisions.md
 ```
 
 These files are intended for local RAG ingestion and later Notion publication if needed.
+
+## Smoke Test Pack
+
+Standard regression checklist:
+
+```text
+ai-delivery-app/rag-data/project_docs/aigile-smoke-test-pack.md
+```
+
+Run it after changes to:
+
+- AIGILE backend;
+- Plane UI patches;
+- Mattermost task chat;
+- RAG backend;
+- Docker Compose;
+- n8n workflows.
+
+The pack covers:
+
+- service health;
+- Plane AI Review Gate;
+- missing type label guard;
+- Mattermost task thread;
+- chat-to-Plane approval;
+- `/kb` RAG query;
+- document upload ingestion;
+- Plane Pages sync;
+- git safety checks.
 
 ## RAG Backend
 

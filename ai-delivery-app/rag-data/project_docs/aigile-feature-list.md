@@ -14,6 +14,13 @@ Updated: 2026-05-27
 - RAG Backend stores and queries local knowledge collections.
 - Notion is used only as external planning/documentation, not as runtime infrastructure.
 
+## Smoke Test Pack
+
+- A reusable smoke test pack exists at `ai-delivery-app/rag-data/project_docs/aigile-smoke-test-pack.md`.
+- The pack is the standard manual verification checklist after AIGILE changes.
+- It covers service health, Plane AI Review Gate, Mattermost task threads, chat-to-Plane approval, `/kb`, document upload ingestion, Plane Pages sync, and git safety checks.
+- It is intended to become the basis for a future health dashboard and automated smoke status.
+
 ## Plane Structure
 
 - Projects were corrected from wrong type-based projects to domain-oriented projects:

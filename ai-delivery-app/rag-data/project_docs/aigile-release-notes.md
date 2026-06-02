@@ -1,5 +1,24 @@
 # AIGILE Release Notes
 
+## 0.1.1 - Stabilization Pack
+
+Date: 2026-06-02
+Status: in progress
+
+### Summary
+
+0.1.1 starts as a stabilization release. The first artifact is a reusable smoke test pack so every future change can be checked against the same local MVP flow.
+
+### Added
+
+- Smoke test pack at `ai-delivery-app/rag-data/project_docs/aigile-smoke-test-pack.md`.
+- Manual verification flow for service health, Plane AI Review Gate, Mattermost task threads, chat-to-Plane approval, RAG `/kb`, document upload ingestion, Plane Pages sync, and git safety.
+
+### Next
+
+- Add a lightweight health dashboard for local services.
+- Turn the manual smoke pack into a more automated status check where practical.
+
 ## 0.1.0 - Local AI Delivery MVP
 
 Date: 2026-05-27
