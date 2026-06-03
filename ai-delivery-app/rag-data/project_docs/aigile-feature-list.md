@@ -39,6 +39,7 @@ Updated: 2026-05-27
   - AI labels and review statuses;
   - apply history when available;
   - module and cycle links when available.
+  - delivery signals captured from Mattermost task threads.
 - MVP blocks:
   - Morning Brief Summary;
   - Delivery Health;
@@ -47,8 +48,18 @@ Updated: 2026-05-27
   - Requirement Quality;
   - Team / Module Signals;
   - Decisions Needed;
+  - Open Questions;
+  - Action Items;
   - Changes Since Yesterday;
   - Suggested Actions for Today.
+- Mattermost task thread commands can capture delivery signals without changing Plane:
+  - `!risk [low|medium|high|critical] text`;
+  - `!blocker text`;
+  - `!dep text`;
+  - `!decision text`;
+  - `!question text`;
+  - `!action text`.
+- Delivery signals are stored separately from task comments in `delivery-signals.jsonl` and can be marked `open`, `acknowledged`, or `resolved`.
 - Historical comparison is explicitly marked unavailable until snapshot history exists.
 - The dashboard does not replace the health index: health index is technical readiness, Delivery Intelligence is management readiness.
 

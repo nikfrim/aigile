@@ -226,6 +226,8 @@ Use it after the health dashboard when you want to show delivery-level signals:
 - requirement quality signals;
 - module signals;
 - decisions needed;
+- Mattermost thread delivery signals;
+- open questions and action items;
 - suggested actions for today.
 
 The dashboard is intentionally honest: unavailable historical comparison is shown as unavailable instead of being faked.
@@ -237,6 +239,37 @@ Manual check:
 3. Open http://localhost:8091/delivery-dashboard.
 4. Confirm Morning Brief, Delivery Health, Top Risks, Requirement Quality, Decisions Needed, and Suggested Actions are visible.
 5. Open http://localhost:8091/api/delivery-intelligence and confirm JSON returns `ok: true`.
+
+Mattermost task thread signals:
+
+```text
+!risk high there is a chance we miss demo scope
+!blocker no access to payment sandbox
+!dep waiting for backend endpoint
+!decision use variant B for MVP
+!question who owns final copy approval?
+!action assign QA owner before release
+```
+
+Signals are saved locally in:
+
+```text
+ai-delivery-app/logs/delivery-signals.jsonl
+```
+
+API:
+
+```text
+GET  /api/delivery-signals
+GET  /api/delivery-signals?status=open
+POST /api/delivery-signals/status
+```
+
+Status update body:
+
+```json
+{ "id": "signal-id", "status": "acknowledged" }
+```
 
 Machine-readable status:
 

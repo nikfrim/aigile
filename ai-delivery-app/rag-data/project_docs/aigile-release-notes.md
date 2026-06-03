@@ -35,6 +35,11 @@ Status: in progress
   - `http://localhost:8091/delivery-dashboard`;
   - JSON report at `http://localhost:8091/api/delivery-intelligence`;
   - Morning Brief, Delivery Health, Top Risks, Blockers, Requirement Quality, Module Signals, Decisions Needed, and Suggested Actions.
+- Meeting & Thread Signals:
+  - Mattermost task thread commands `!risk`, `!blocker`, `!dep`, `!decision`, `!question`, and `!action`;
+  - local JSONL signal store at `delivery-signals.jsonl`;
+  - dashboard sections for Open Questions and Action Items;
+  - API to list signals and mark them `acknowledged` or `resolved`.
 
 ### Next
 

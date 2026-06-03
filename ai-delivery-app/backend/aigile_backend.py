@@ -48,6 +48,7 @@ LOG_PATH = Path(os.environ.get("AIGILE_LOG_PATH", "/data/logs/manual-trigger.log
 REVIEW_GATE_ENABLED = os.environ.get("AIGILE_AI_REVIEW_GATE_ENABLED", "false").lower() == "true"
 REVIEW_HISTORY_PATH = Path(os.environ.get("AIGILE_REVIEW_HISTORY_PATH", "/data/logs/ai-review-history.jsonl"))
 APPLY_HISTORY_PATH = Path(os.environ.get("AIGILE_APPLY_HISTORY_PATH", "/data/logs/ai-apply-history.jsonl"))
+DELIVERY_SIGNALS_PATH = Path(os.environ.get("AIGILE_DELIVERY_SIGNALS_PATH", "/data/logs/delivery-signals.jsonl"))
 TASK_CHAT_CONTEXT_PATH = Path(os.environ.get("AIGILE_TASK_CHAT_CONTEXT_PATH", "/data/logs/task-chat-context.jsonl"))
 TASK_CHAT_THREAD_ENABLED = os.environ.get("AIGILE_TASK_CHAT_THREAD_ENABLED", "true").lower() == "true"
 TASK_CHAT_POLL_SECONDS = int(os.environ.get("AIGILE_TASK_CHAT_POLL_SECONDS", "8"))
@@ -136,6 +137,13 @@ def append_apply_history(event: dict) -> None:
         handle.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
+def append_delivery_signal(signal: dict) -> None:
+    ensure_dirs()
+    DELIVERY_SIGNALS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with DELIVERY_SIGNALS_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(signal, ensure_ascii=False) + "\n")
+
+
 def append_task_chat_context(event: dict) -> None:
     ensure_dirs()
     TASK_CHAT_CONTEXT_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -220,6 +228,52 @@ def read_apply_history(limit: int = 200) -> list[dict]:
             except json.JSONDecodeError:
                 continue
     return events[-limit:]
+
+
+def read_delivery_signals(status: str | None = None, limit: int = 500) -> list[dict]:
+    if not DELIVERY_SIGNALS_PATH.exists():
+        return []
+    signals = {}
+    with DELIVERY_SIGNALS_PATH.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            signal_id = event.get("id")
+            if not signal_id:
+                continue
+            if event.get("event") == "status_update":
+                if signal_id in signals:
+                    signals[signal_id]["status"] = event.get("status") or signals[signal_id].get("status")
+                    signals[signal_id]["updated_at"] = event.get("updated_at") or utc_now_iso()
+                    signals[signal_id]["updated_by"] = event.get("updated_by")
+                continue
+            signals[signal_id] = event
+    values = list(signals.values())
+    if status:
+        values = [signal for signal in values if signal.get("status") == status]
+    return values[-limit:]
+
+
+def update_delivery_signal_status(signal_id: str, status: str, updated_by: str = "system") -> dict:
+    status = str(status or "").lower().strip()
+    if status not in {"open", "acknowledged", "resolved"}:
+        raise ValueError("Invalid signal status")
+    existing = {signal.get("id") for signal in read_delivery_signals(limit=5000)}
+    if signal_id not in existing:
+        raise ValueError("Delivery signal not found")
+    event = {
+        "event": "status_update",
+        "id": signal_id,
+        "status": status,
+        "updated_by": updated_by,
+        "updated_at": utc_now_iso(),
+    }
+    append_delivery_signal(event)
+    return {"ok": True, "id": signal_id, "status": status}
 
 
 def find_review_history_item(issue_key: str, review_id: str) -> dict | None:
@@ -429,6 +483,8 @@ def build_delivery_intelligence_report() -> dict:
     project = find_demo_project()
     reviews = latest_reviews_by_issue()
     apply_events = read_apply_history(limit=500)
+    delivery_signals = read_delivery_signals(limit=1000)
+    open_signals = [signal for signal in delivery_signals if signal.get("status", "open") == "open"]
     issues = list(
         Issue.objects.select_related("workspace", "project", "state", "type")
         .prefetch_related("labels")
@@ -449,6 +505,8 @@ def build_delivery_intelligence_report() -> dict:
     }
     module_signals: dict[str, dict] = {}
     decisions_needed = []
+    open_questions = []
+    action_items = []
 
     for issue in issues:
         key = issue_key(issue)
@@ -529,12 +587,77 @@ def build_delivery_intelligence_report() -> dict:
             else:
                 signal["unreviewed"] += 1
 
+    for signal in open_signals:
+        signal_type = signal.get("type")
+        issue_key_value = signal.get("related_issue_key") or "n/a"
+        signal_issue_url = f"http://localhost:8080/aigile/browse/{issue_key_value}/" if issue_key_value != "n/a" else "#"
+        signal_text = signal.get("text") or ""
+        signal_item = {
+            "key": issue_key_value,
+            "title": signal_text,
+            "url": signal_issue_url,
+            "module": signal.get("module") or "Not available",
+            "reason": signal_text,
+            "source": signal.get("source") or "mattermost_thread",
+            "signal_id": signal.get("id"),
+            "severity": signal.get("severity") or "medium",
+            "status": signal.get("status") or "open",
+        }
+        if signal_type == "risk":
+            top_risks.append({
+                "risk": signal_text,
+                "description": signal.get("suggested_action") or "",
+                "severity": signal.get("severity") or "medium",
+                "source": signal.get("source") or "mattermost_thread",
+                "agent": "Task thread",
+                "issue_key": issue_key_value,
+                "issue_title": signal_text,
+                "issue_url": signal_issue_url,
+                "module": signal.get("module") or "Not available",
+                "suggested_action": signal.get("suggested_action") or "Assign an owner and define mitigation.",
+            })
+        elif signal_type == "blocker":
+            blockers.append(signal_item)
+        elif signal_type == "dependency":
+            top_risks.append({
+                "risk": f"Dependency: {signal_text}",
+                "description": signal.get("suggested_action") or "",
+                "severity": signal.get("severity") or "medium",
+                "source": signal.get("source") or "mattermost_thread",
+                "agent": "Task thread",
+                "issue_key": issue_key_value,
+                "issue_title": signal_text,
+                "issue_url": signal_issue_url,
+                "module": signal.get("module") or "Not available",
+                "suggested_action": signal.get("suggested_action") or "Confirm dependency owner and date.",
+            })
+        elif signal_type == "decision":
+            decisions_needed.append({
+                "decision": signal_text,
+                "why": "Captured from Mattermost task thread.",
+                "issue_key": issue_key_value,
+                "issue_url": signal_issue_url,
+                "recommended_owner": "Delivery Manager / task owner",
+                "action": signal.get("suggested_action") or "Record the decision and communicate impact.",
+                "signal_id": signal.get("id"),
+            })
+        elif signal_type == "question":
+            open_questions.append(signal_item)
+        elif signal_type == "action_item":
+            action_items.append(signal_item)
+
+    has_critical_signal = any(
+        signal.get("type") == "blocker" or signal.get("severity") == "critical"
+        for signal in open_signals
+    )
     red = status_counts["red"]
     yellow = status_counts["yellow"]
-    overall = "red" if red else "yellow" if yellow or unreviewed else "green"
+    overall = "red" if red or has_critical_signal else "yellow" if yellow or unreviewed or open_signals else "green"
     main_findings = []
     if red:
         main_findings.append(f"{red} reviewed task(s) have red AI review.")
+    if has_critical_signal:
+        main_findings.append("Open Mattermost task thread signals include a blocker or critical severity item.")
     if yellow:
         main_findings.append(f"{yellow} reviewed task(s) have yellow AI review.")
     if unreviewed:
@@ -553,6 +676,10 @@ def build_delivery_intelligence_report() -> dict:
         suggested_actions.append("Run refinement on tasks missing acceptance criteria.")
     if top_risks:
         suggested_actions.append(f"Assign an owner for risk: {top_risks[0]['risk']}.")
+    if open_questions:
+        suggested_actions.append(f"Clarify open question for {open_questions[0]['key']}: {open_questions[0]['title']}.")
+    if action_items:
+        suggested_actions.append(f"Follow up action item for {action_items[0]['key']}: {action_items[0]['title']}.")
     if unreviewed:
         suggested_actions.append("Run AI analysis for the highest-priority unreviewed tasks.")
     if not suggested_actions:
@@ -586,6 +713,13 @@ def build_delivery_intelligence_report() -> dict:
         },
         "module_signals": sorted(module_signals.values(), key=lambda item: (item["red"], item["yellow"], item["unreviewed"]), reverse=True),
         "decisions_needed": decisions_needed[:10],
+        "open_questions": open_questions[:10],
+        "action_items": action_items[:10],
+        "delivery_signals": {
+            "total": len(delivery_signals),
+            "open": len(open_signals),
+            "items": open_signals[-20:],
+        },
         "changes_since_yesterday": {
             "available": False,
             "message": "Historical comparison is not available yet.",
@@ -597,6 +731,7 @@ def build_delivery_intelligence_report() -> dict:
             "ai_review_history": REVIEW_HISTORY_PATH.exists(),
             "ai_apply_history": APPLY_HISTORY_PATH.exists(),
             "mattermost_task_thread_memory": TASK_CHAT_CONTEXT_PATH.exists(),
+            "delivery_signals": DELIVERY_SIGNALS_PATH.exists(),
             "rag_decision_log": "Not available in this dashboard MVP",
         },
     }
@@ -857,6 +992,23 @@ def render_delivery_intelligence_dashboard(report: dict) -> str:
         <tbody>{''.join(decision_rows)}</tbody>
       </table>
     </section>
+
+    <div class="layout">
+      <section>
+        <h2>Open Questions</h2>
+        <table>
+          <thead><tr><th>Issue</th><th>Question</th><th>Module</th><th>Source</th></tr></thead>
+          <tbody>{issue_rows(report.get("open_questions") or [], "No open questions captured from task threads.", include_reason=True)}</tbody>
+        </table>
+      </section>
+      <section>
+        <h2>Action Items</h2>
+        <table>
+          <thead><tr><th>Issue</th><th>Action</th><th>Module</th><th>Source</th></tr></thead>
+          <tbody>{issue_rows(report.get("action_items") or [], "No action items captured from task threads.", include_reason=True)}</tbody>
+        </table>
+      </section>
+    </div>
 
     <div class="layout">
       <section>
@@ -2974,13 +3126,106 @@ def is_task_chat_status(value: str) -> bool:
     return text in {"!status", "/status", "status", "статус", "контекст", "память"}
 
 
+SIGNAL_COMMANDS = {
+    "!risk": "risk",
+    "!blocker": "blocker",
+    "!dep": "dependency",
+    "!dependency": "dependency",
+    "!decision": "decision",
+    "!question": "question",
+    "!action": "action_item",
+}
+
+
+def parse_delivery_signal_command(value: str) -> dict | None:
+    raw = str(value or "").strip()
+    if not raw.startswith("!"):
+        return None
+    parts = raw.split(maxsplit=2)
+    command = parts[0].lower()
+    signal_type = SIGNAL_COMMANDS.get(command)
+    if not signal_type:
+        return None
+    severity = "medium"
+    text = ""
+    if len(parts) >= 2:
+        maybe_severity = parts[1].lower().strip(" .!,;:")
+        if maybe_severity in {"low", "medium", "high", "critical"}:
+            severity = maybe_severity
+            text = parts[2].strip() if len(parts) >= 3 else ""
+        else:
+            text = raw[len(parts[0]):].strip()
+    if not text:
+        return {"ok": False, "command": command, "type": signal_type, "error": "Signal text is missing."}
+    if signal_type == "blocker" and severity == "medium":
+        severity = "critical"
+    return {"ok": True, "command": command, "type": signal_type, "severity": severity, "text": text[:2000]}
+
+
+def suggested_action_for_signal(signal_type: str, text: str) -> str:
+    actions = {
+        "risk": "Assign an owner and decide mitigation or acceptance.",
+        "blocker": "Escalate today and define the next unblock action.",
+        "dependency": "Confirm dependency owner, expected date, and fallback path.",
+        "decision": "Record the decision in the task context and communicate impact.",
+        "question": "Clarify with the right owner before moving the task forward.",
+        "action_item": "Assign owner and due date.",
+    }
+    return actions.get(signal_type, "Review this signal with the task owner.")
+
+
+def create_delivery_signal_from_context(context: dict, parsed: dict, post: dict | None = None) -> dict:
+    graph = context.get("context_graph") if isinstance(context.get("context_graph"), dict) else {}
+    issue = graph.get("current") or context.get("issue") or {}
+    modules = graph.get("modules") or []
+    module_names = [item.get("name") for item in modules if isinstance(item, dict) and item.get("name")]
+    signal = {
+        "id": str(uuid.uuid4()),
+        "type": parsed["type"],
+        "severity": parsed["severity"],
+        "source": "mattermost_thread",
+        "related_issue_key": issue.get("key") or context.get("issue_key"),
+        "related_issue_id": issue.get("id") or (context.get("issue") or {}).get("id"),
+        "team": "Not available",
+        "module": ", ".join(module_names) if module_names else "Not available",
+        "text": parsed["text"],
+        "suggested_action": suggested_action_for_signal(parsed["type"], parsed["text"]),
+        "created_at": utc_now_iso(),
+        "status": "open",
+        "mattermost": {
+            "channel_id": context.get("channel_id"),
+            "thread_root_id": context.get("thread_root_id"),
+            "post_id": post.get("id") if isinstance(post, dict) else None,
+            "user_id": post.get("user_id") if isinstance(post, dict) else None,
+        },
+    }
+    append_delivery_signal(signal)
+    append_execution_log({
+        "event": "delivery_signal_created",
+        "status": "success",
+        "issue_key": signal.get("related_issue_key"),
+        "signal_id": signal["id"],
+        "signal_type": signal["type"],
+        "source": signal["source"],
+    })
+    return signal
+
+
+def format_delivery_signal_created(signal: dict) -> str:
+    return f"""Delivery signal saved: `{signal.get("type")}` / `{signal.get("severity")}`.
+
+Issue: `{signal.get("related_issue_key") or "unknown"}`
+Status: `{signal.get("status") or "open"}`
+Text: {signal.get("text") or ""}
+
+It will appear on the Delivery Intelligence Dashboard."""
+
+
 def looks_like_task_update_request(value: str) -> bool:
     text = normalize_chat_text(value)
     patterns = [
         "!ac",
         "!note",
-        "!risk",
-        "!dep",
         "!deadline",
         "добав",
         "обнов",
@@ -3001,6 +3246,33 @@ def looks_like_task_update_request(value: str) -> bool:
 
 
 def format_task_chat_help() -> str:
+    return """**AIGILE Task Agent**
+
+I keep Plane task context in this thread: description, labels, status, parent Epic, links, module, cycle, and latest AI review.
+
+Task update commands:
+
+- `!ac text` - prepare Acceptance Criteria in the task description with `[AI]`;
+- `!note text` - prepare a Plane comment;
+- `!deadline text` - prepare a deadline note as a Plane comment.
+
+Delivery signal commands for the dashboard:
+
+- `!risk [low|medium|high|critical] text` - risk;
+- `!blocker text` - blocker;
+- `!dep text` - dependency;
+- `!decision text` - decision;
+- `!question text` - open question;
+- `!action text` - action item.
+
+Service commands:
+
+- `!status` - show task memory;
+- `!help` - show this guide.
+
+I do not change Plane immediately. First I prepare a draft.
+Apply: `y` or `да`.
+Cancel: `n` or `нет`."""
     return """**AIGILE Task Agent**
 
 Я держу контекст этой Plane-задачи в треде: описание, метки, статус, родительский эпик, связи, модуль, цикл и последний AI review.
@@ -3426,6 +3698,15 @@ def poll_task_chat_threads(payload: dict | None = None) -> dict:
                 answer = format_task_chat_help()
             elif is_task_chat_status(message):
                 answer = format_task_chat_status(context, thread_state)
+            elif (parsed_signal := parse_delivery_signal_command(message)):
+                if not parsed_signal.get("ok"):
+                    answer = (
+                        "Не сохранил delivery signal: добавь текст после команды.\n\n"
+                        "Пример: `!risk high есть риск не успеть к демо`."
+                    )
+                else:
+                    signal = create_delivery_signal_from_context(context, parsed_signal, post)
+                    answer = format_delivery_signal_created(signal)
             elif pending_draft and is_task_chat_cancel(message):
                 thread_state.pop("pending_draft", None)
                 answer = "Ок, черновик отменён. Plane не изменял."
@@ -3819,6 +4100,12 @@ class Handler(BaseHTTPRequestHandler):
             report = build_delivery_intelligence_report()
             json_response(self, 200, report)
             return
+        if parsed.path == "/api/delivery-signals":
+            params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+            status = params.get("status")
+            limit = int(params.get("limit") or 500)
+            json_response(self, 200, {"ok": True, "signals": read_delivery_signals(status=status, limit=limit)})
+            return
         if parsed.path == "/api/resolve-issue":
             try:
                 payload = {k: v[0] for k, v in parse_qs(parsed.query).items()}
@@ -3888,6 +4175,17 @@ class Handler(BaseHTTPRequestHandler):
                 json_response(self, 200 if result.get("ok") else 400, result)
             except Exception as exc:
                 logger.exception("Task chat poll failed")
+                json_response(self, 500, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/api/delivery-signals/status":
+            try:
+                payload = read_body(self)
+                result = update_delivery_signal_status(payload.get("id"), payload.get("status"), payload.get("updated_by") or "api")
+                json_response(self, 200, result)
+            except ValueError as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                logger.exception("Delivery signal status update failed")
                 json_response(self, 500, {"ok": False, "error": str(exc)})
             return
         if parsed.path == "/api/refresh-knowledge-base":

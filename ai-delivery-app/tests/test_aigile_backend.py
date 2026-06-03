@@ -731,6 +731,79 @@ class ReviewGateTests(unittest.TestCase):
         self.assertTrue(aigile_backend.is_task_chat_status("!status"))
         self.assertFalse(aigile_backend.looks_like_task_update_request("!help"))
         self.assertFalse(aigile_backend.looks_like_task_update_request("!status"))
+        self.assertFalse(aigile_backend.looks_like_task_update_request("!risk high release can slip"))
+
+    def test_delivery_signal_command_parser(self):
+        signal = aigile_backend.parse_delivery_signal_command("!risk high есть риск не успеть")
+
+        self.assertTrue(signal["ok"])
+        self.assertEqual(signal["type"], "risk")
+        self.assertEqual(signal["severity"], "high")
+        self.assertEqual(signal["text"], "есть риск не успеть")
+
+    def test_delivery_signal_status_update_replays_jsonl(self):
+        tmp = Path(tempfile.gettempdir()) / "aigile-test-delivery-signals.jsonl"
+        tmp.unlink(missing_ok=True)
+        original = aigile_backend.DELIVERY_SIGNALS_PATH
+        try:
+            aigile_backend.DELIVERY_SIGNALS_PATH = tmp
+            aigile_backend.append_delivery_signal({
+                "id": "signal-1",
+                "type": "risk",
+                "severity": "high",
+                "source": "mattermost_thread",
+                "related_issue_key": "AIGILE-1",
+                "text": "release can slip",
+                "status": "open",
+                "created_at": "2026-06-03T00:00:00Z",
+            })
+            aigile_backend.update_delivery_signal_status("signal-1", "acknowledged", "tester")
+            signals = aigile_backend.read_delivery_signals()
+        finally:
+            aigile_backend.DELIVERY_SIGNALS_PATH = original
+            tmp.unlink(missing_ok=True)
+
+        self.assertEqual(signals[0]["status"], "acknowledged")
+        self.assertEqual(signals[0]["updated_by"], "tester")
+
+    def test_task_chat_signal_command_creates_delivery_signal(self):
+        context = {
+            "ok": True,
+            "context_id": "ctx-1",
+            "issue_key": "AIGILE-1",
+            "channel_id": "channel-1",
+            "thread_root_id": "root-1",
+            "issue": {"key": "AIGILE-1", "title": "Login bug"},
+            "context_graph": {
+                "current": {"key": "AIGILE-1", "title": "Login bug"},
+                "modules": [{"name": "Auth"}],
+            },
+        }
+        state = {"threads": {"root-1": {"processed_post_ids": ["root-1"]}}}
+        posts = [
+            {"id": "root-1", "user_id": "bot-1", "message": "Task card", "create_at": 1},
+            {"id": "user-reply-1", "user_id": "user-1", "message": "!blocker нужен доступ к платежному стенду", "create_at": 2},
+        ]
+        with (
+            mock.patch.object(aigile_backend, "read_task_chat_contexts", return_value=[context]),
+            mock.patch.object(aigile_backend, "mattermost_current_user", return_value={"id": "bot-1"}),
+            mock.patch.object(aigile_backend, "read_task_chat_state", return_value=state),
+            mock.patch.object(aigile_backend, "mattermost_thread_posts", return_value=posts),
+            mock.patch.object(aigile_backend, "post_mattermost_channel_message", return_value={"id": "bot-reply-1"}) as post_message,
+            mock.patch.object(aigile_backend, "write_task_chat_state"),
+            mock.patch.object(aigile_backend, "append_delivery_signal") as append_signal,
+            mock.patch.object(aigile_backend, "append_execution_log"),
+        ):
+            result = aigile_backend.poll_task_chat_threads({"force": True})
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["replies"], 1)
+        append_signal.assert_called_once()
+        signal = append_signal.call_args.args[0]
+        self.assertEqual(signal["type"], "blocker")
+        self.assertEqual(signal["severity"], "critical")
+        self.assertEqual(signal["related_issue_key"], "AIGILE-1")
+        self.assertIn("Delivery signal saved", post_message.call_args.args[1])
 
     def test_plane_page_rag_requires_ai_marker_and_public_access(self):
         public_page = SimpleNamespace(name="[AI] Agent Rules", access=0, deleted_at=None, archived_at=None)
