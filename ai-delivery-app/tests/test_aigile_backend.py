@@ -209,7 +209,72 @@ class DeliveryIntelligenceTests(unittest.TestCase):
         self.assertIn("Top Risks", html)
         self.assertIn("Requirement Quality", html)
         self.assertIn("Decisions Needed", html)
+        self.assertIn("Daily brief", html)
         self.assertIn("/api/delivery-intelligence", html)
+
+    def test_daily_delivery_brief_uses_available_data_and_honest_gaps(self):
+        report = {
+            "created_at": "2026-06-03T08:00:00Z",
+            "project": "AIGILE Platform",
+            "overall_status": "yellow",
+            "morning_brief": {"findings": ["2 reviewed task(s) have yellow AI review."]},
+            "delivery_health": {"reviewed_total": 2, "unreviewed_total": 1},
+            "top_risks": [{
+                "issue_key": "AIGILE-1",
+                "issue_title": "Demo risk",
+                "risk": "Scope can slip",
+                "severity": "high",
+                "source": "AI Review",
+                "suggested_action": "Assign owner.",
+            }],
+            "blockers": [],
+            "decisions_needed": [],
+            "requirement_quality": {
+                "without_acceptance_criteria": {"items": [{"key": "AIGILE-2", "title": "Needs AC"}]},
+                "without_type_label": {"items": []},
+                "missing_info": {"items": []},
+                "yellow_red_qa_review": {"items": []},
+                "risks_or_dependencies_detected": {"items": []},
+            },
+            "changes_since_yesterday": {"available": False, "message": "Historical comparison is not available yet."},
+            "suggested_actions": ["Run refinement on tasks missing acceptance criteria."],
+            "delivery_signals": {"total": 0, "open": 0},
+        }
+
+        brief = aigile_backend.build_daily_delivery_brief(report)
+
+        self.assertTrue(brief["ok"])
+        self.assertEqual(brief["overall_status"], "yellow")
+        self.assertIn("yellow AI review", brief["executive_summary"])
+        self.assertEqual(brief["top_5_risks"][0]["summary"], "Scope can slip")
+        self.assertEqual(brief["requirement_quality_issues"][0]["issue_key"], "AIGILE-2")
+        self.assertIn("No meeting/thread signals available.", brief["data_notes"])
+        self.assertIn("Historical comparison is not available yet.", brief["data_notes"])
+
+    def test_daily_delivery_brief_render_and_mattermost_format(self):
+        brief = {
+            "date": "2026-06-03",
+            "created_at": "2026-06-03T08:00:00Z",
+            "project": "AIGILE Platform",
+            "overall_status": "red",
+            "executive_summary": "A blocker needs attention.",
+            "top_5_risks": [],
+            "top_blockers": [{"issue_key": "AIGILE-3", "summary": "No access", "severity": "critical", "source": "mattermost_thread"}],
+            "decisions_needed": [],
+            "requirement_quality_issues": [],
+            "changes_since_yesterday": {"summary": "Historical comparison is not available yet."},
+            "suggested_actions_for_today": ["Escalate access blocker."],
+            "data_notes": ["No critical risks found in available data."],
+        }
+
+        html = aigile_backend.render_daily_delivery_brief(brief)
+        message = aigile_backend.format_daily_delivery_brief_mattermost(brief)
+
+        self.assertIn("Daily Delivery Brief", html)
+        self.assertIn("Executive Summary", html)
+        self.assertIn("Requirement Quality Issues", html)
+        self.assertIn("Daily Delivery Brief", message)
+        self.assertIn("AIGILE-3", message)
 
 
 class ReviewGateTests(unittest.TestCase):

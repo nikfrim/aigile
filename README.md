@@ -210,10 +210,22 @@ Management morning brief:
 http://localhost:8091/delivery-dashboard
 ```
 
+Daily Delivery Brief:
+
+```text
+http://localhost:8091/daily-delivery-brief
+```
+
 Machine-readable report:
 
 ```text
 http://localhost:8091/api/delivery-intelligence
+```
+
+Machine-readable daily brief:
+
+```text
+http://localhost:8091/api/daily-delivery-brief
 ```
 
 Use it after the health dashboard when you want to show delivery-level signals:
@@ -228,6 +240,7 @@ Use it after the health dashboard when you want to show delivery-level signals:
 - decisions needed;
 - Mattermost thread delivery signals;
 - open questions and action items;
+- daily delivery brief for interviews and morning management review;
 - suggested actions for today.
 
 The dashboard is intentionally honest: unavailable historical comparison is shown as unavailable instead of being faked.
@@ -239,6 +252,21 @@ Manual check:
 3. Open http://localhost:8091/delivery-dashboard.
 4. Confirm Morning Brief, Delivery Health, Top Risks, Requirement Quality, Decisions Needed, and Suggested Actions are visible.
 5. Open http://localhost:8091/api/delivery-intelligence and confirm JSON returns `ok: true`.
+6. Open http://localhost:8091/daily-delivery-brief and confirm Executive Summary, Top 5 Risks, Top Blockers, Decisions Needed, Requirement Quality Issues, Changes Since Yesterday, and Suggested Actions are visible.
+7. Open http://localhost:8091/api/daily-delivery-brief and confirm JSON returns `ok: true`.
+
+Optional Mattermost send:
+
+```powershell
+$body = @{ channel_id = "<mattermost-channel-id>" } | ConvertTo-Json
+Invoke-RestMethod -Uri "http://127.0.0.1:8091/api/daily-delivery-brief/send" -Method Post -ContentType "application/json" -Body $body
+```
+
+The brief does not invent facts. If data is missing, it says so directly, for example:
+
+- `No critical risks found in available data.`
+- `No meeting/thread signals available.`
+- `Historical comparison is not available yet.`
 
 Mattermost task thread signals:
 

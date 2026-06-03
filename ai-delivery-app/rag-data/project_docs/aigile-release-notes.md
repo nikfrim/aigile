@@ -40,6 +40,11 @@ Status: in progress
   - local JSONL signal store at `delivery-signals.jsonl`;
   - dashboard sections for Open Questions and Action Items;
   - API to list signals and mark them `acknowledged` or `resolved`.
+- Daily Delivery Brief:
+  - page at `http://localhost:8091/daily-delivery-brief`;
+  - JSON endpoint at `http://localhost:8091/api/daily-delivery-brief`;
+  - Mattermost send endpoint `POST /api/daily-delivery-brief/send`;
+  - executive summary, top risks, blockers, decisions, requirement quality, changes since yesterday, and suggested actions.
 
 ### Next
 

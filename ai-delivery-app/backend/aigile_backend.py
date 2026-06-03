@@ -747,6 +747,272 @@ def status_badge(status: str) -> str:
     return f'<span class="badge {cls}">{escape(status.upper())}</span>'
 
 
+def brief_item_text(item: dict, *keys: str, fallback: str = "") -> str:
+    for key in keys:
+        value = item.get(key)
+        if value:
+            return str(value)
+    return fallback
+
+
+def issue_ref(key: str | None, title: str | None = None) -> str:
+    if not key:
+        return title or "n/a"
+    return f"{key}: {title}" if title else key
+
+
+def build_daily_delivery_brief(report: dict | None = None) -> dict:
+    report = report or build_delivery_intelligence_report()
+    rq = report.get("requirement_quality") or {}
+    delivery_signals = report.get("delivery_signals") or {}
+    top_risks = []
+    for risk in report.get("top_risks") or []:
+        top_risks.append({
+            "issue_key": risk.get("issue_key"),
+            "issue_title": risk.get("issue_title"),
+            "severity": risk.get("severity") or "medium",
+            "source": risk.get("source") or risk.get("agent") or "unknown",
+            "summary": brief_item_text(risk, "risk", "description", fallback="Risk without summary"),
+            "suggested_action": risk.get("suggested_action") or "Review with owner.",
+        })
+
+    blockers = []
+    for item in report.get("blockers") or []:
+        blockers.append({
+            "issue_key": item.get("key"),
+            "issue_title": item.get("title"),
+            "severity": item.get("severity") or "high",
+            "source": item.get("source") or "AI Review",
+            "summary": item.get("reason") or item.get("title") or "Blocker without summary",
+            "suggested_action": "Decide owner and unblock path today.",
+        })
+
+    decisions = []
+    for decision in report.get("decisions_needed") or []:
+        decisions.append({
+            "issue_key": decision.get("issue_key"),
+            "source": "Delivery Intelligence",
+            "summary": decision.get("decision") or "Decision needed",
+            "why": decision.get("why") or "",
+            "suggested_action": decision.get("action") or "Make or assign the decision today.",
+        })
+
+    quality_issues = []
+    quality_labels = {
+        "without_acceptance_criteria": "Missing acceptance criteria",
+        "without_type_label": "Missing type label",
+        "missing_info": "Missing critical task information",
+        "yellow_red_qa_review": "QA review needs attention",
+        "risks_or_dependencies_detected": "Risk or dependency detected",
+    }
+    for key, label in quality_labels.items():
+        block = rq.get(key) or {}
+        for item in block.get("items") or []:
+            quality_issues.append({
+                "issue_key": item.get("key"),
+                "issue_title": item.get("title"),
+                "summary": label,
+                "source": "Plane / AI Review",
+            })
+
+    data_notes = []
+    if not top_risks:
+        data_notes.append("No critical risks found in available data.")
+    if not blockers:
+        data_notes.append("No blockers found in available data.")
+    if not decisions:
+        data_notes.append("No management decisions detected in available data.")
+    if not delivery_signals.get("total"):
+        data_notes.append("No meeting/thread signals available.")
+    changes = report.get("changes_since_yesterday") or {}
+    if not changes.get("available"):
+        data_notes.append(changes.get("message") or "Historical comparison is not available yet.")
+
+    findings = (report.get("morning_brief") or {}).get("findings") or []
+    actions = report.get("suggested_actions") or []
+    executive_summary = " ".join(findings[:3]).strip()
+    if not executive_summary:
+        executive_summary = "No urgent delivery action detected from available data."
+
+    return {
+        "ok": True,
+        "date": datetime.now(timezone.utc).date().isoformat(),
+        "created_at": utc_now_iso(),
+        "project": report.get("project") or "AIGILE",
+        "overall_status": report.get("overall_status") or "unknown",
+        "executive_summary": executive_summary,
+        "top_5_risks": top_risks[:5],
+        "top_blockers": blockers[:5],
+        "decisions_needed": decisions[:5],
+        "requirement_quality_issues": quality_issues[:10],
+        "changes_since_yesterday": {
+            "available": bool(changes.get("available")),
+            "summary": changes.get("message") or "Historical comparison is not available yet.",
+        },
+        "suggested_actions_for_today": actions[:5] or ["No urgent delivery action detected from available data."],
+        "data_notes": data_notes,
+        "source_counts": {
+            "reviewed_total": (report.get("delivery_health") or {}).get("reviewed_total") or 0,
+            "unreviewed_total": (report.get("delivery_health") or {}).get("unreviewed_total") or 0,
+            "delivery_signals_total": delivery_signals.get("total") or 0,
+            "delivery_signals_open": delivery_signals.get("open") or 0,
+        },
+        "source_report_created_at": report.get("created_at"),
+    }
+
+
+def render_brief_list(items: list[dict], empty: str, fields: tuple[str, ...]) -> str:
+    if not items:
+        return f"<li class=\"muted\">{escape(empty)}</li>"
+    rows = []
+    for item in items:
+        prefix = issue_ref(item.get("issue_key"), item.get("issue_title"))
+        details = " | ".join(str(item.get(field) or "") for field in fields if item.get(field))
+        rows.append(f"<li><strong>{escape(prefix)}</strong><br><span>{escape(details or item.get('summary') or '')}</span></li>")
+    return "".join(rows)
+
+
+def render_daily_delivery_brief(brief: dict) -> str:
+    notes = "".join(f"<li>{escape(str(note))}</li>" for note in brief.get("data_notes") or [])
+    if not notes:
+        notes = '<li>No data gaps detected in available sources.</li>'
+    actions = "".join(f"<li>{escape(str(action))}</li>" for action in brief.get("suggested_actions_for_today") or [])
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AIGILE Daily Delivery Brief</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      --bg: #101214;
+      --panel: #171a1f;
+      --line: #2b3038;
+      --text: #e7e9ee;
+      --muted: #a1a8b3;
+      --green: #24c36b;
+      --yellow: #f0c94a;
+      --red: #ff5d5d;
+      --blue: #78b7ff;
+    }}
+    body {{ margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }}
+    main {{ max-width: 980px; margin: 0 auto; padding: 32px 20px 56px; }}
+    header {{ display: flex; justify-content: space-between; align-items: flex-end; gap: 20px; margin-bottom: 20px; }}
+    h1 {{ margin: 0 0 8px; font-size: 30px; letter-spacing: 0; }}
+    h2 {{ margin: 0 0 12px; font-size: 18px; }}
+    p {{ color: var(--muted); margin: 0; line-height: 1.5; }}
+    section {{ background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-bottom: 14px; }}
+    ul {{ margin: 0; padding-left: 20px; }}
+    li {{ margin: 8px 0; }}
+    a {{ color: var(--blue); text-decoration: none; }}
+    .badge {{ display: inline-flex; border-radius: 999px; border: 1px solid var(--muted); color: var(--muted); padding: 4px 9px; font-size: 12px; font-weight: 800; }}
+    .badge.green {{ color: var(--green); border-color: var(--green); }}
+    .badge.yellow {{ color: var(--yellow); border-color: var(--yellow); }}
+    .badge.red {{ color: var(--red); border-color: var(--red); }}
+    .muted {{ color: var(--muted); }}
+    .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
+    .actions {{ display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }}
+    .button {{ display: inline-flex; border: 1px solid var(--line); background: #1d222b; color: var(--text); border-radius: 8px; padding: 9px 12px; font-size: 14px; }}
+    @media (max-width: 760px) {{ header, .grid {{ display: block; }} }}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>Daily Delivery Brief</h1>
+        <p>{escape(str(brief.get("project") or "AIGILE"))} · {escape(str(brief.get("date") or ""))} · Generated {escape(str(brief.get("created_at") or ""))}</p>
+      </div>
+      {status_badge(str(brief.get("overall_status") or "unknown"))}
+    </header>
+
+    <section>
+      <h2>Executive Summary</h2>
+      <p>{escape(str(brief.get("executive_summary") or ""))}</p>
+    </section>
+
+    <div class="grid">
+      <section>
+        <h2>Top 5 Risks</h2>
+        <ul>{render_brief_list(brief.get("top_5_risks") or [], "No critical risks found in available data.", ("severity", "source", "summary", "suggested_action"))}</ul>
+      </section>
+      <section>
+        <h2>Top Blockers</h2>
+        <ul>{render_brief_list(brief.get("top_blockers") or [], "No blockers found in available data.", ("severity", "source", "summary", "suggested_action"))}</ul>
+      </section>
+    </div>
+
+    <div class="grid">
+      <section>
+        <h2>Decisions Needed</h2>
+        <ul>{render_brief_list(brief.get("decisions_needed") or [], "No management decisions detected in available data.", ("summary", "why", "suggested_action"))}</ul>
+      </section>
+      <section>
+        <h2>Requirement Quality Issues</h2>
+        <ul>{render_brief_list(brief.get("requirement_quality_issues") or [], "No requirement quality issues found in available data.", ("summary", "source"))}</ul>
+      </section>
+    </div>
+
+    <section>
+      <h2>Changes Since Yesterday</h2>
+      <p>{escape(str((brief.get("changes_since_yesterday") or {}).get("summary") or "Historical comparison is not available yet."))}</p>
+    </section>
+
+    <section>
+      <h2>Suggested Actions for Today</h2>
+      <ul>{actions}</ul>
+    </section>
+
+    <section>
+      <h2>Data Notes</h2>
+      <ul>{notes}</ul>
+    </section>
+
+    <div class="actions">
+      <a class="button" href="/delivery-dashboard">Delivery dashboard</a>
+      <a class="button" href="/api/daily-delivery-brief">JSON brief</a>
+      <a class="button" href="/dashboard">Health dashboard</a>
+    </div>
+  </main>
+</body>
+</html>"""
+
+
+def format_daily_delivery_brief_mattermost(brief: dict) -> str:
+    def bullet(items: list[dict], empty: str, key: str = "summary") -> str:
+        if not items:
+            return f"- {empty}"
+        lines = []
+        for item in items[:5]:
+            issue = item.get("issue_key")
+            prefix = f"`{issue}` " if issue else ""
+            lines.append(f"- {prefix}{item.get(key) or item.get('summary') or ''}")
+        return "\n".join(lines)
+
+    actions = "\n".join(f"- {action}" for action in brief.get("suggested_actions_for_today") or [])
+    notes = "\n".join(f"- {note}" for note in brief.get("data_notes") or [])
+    return f"""**Daily Delivery Brief** · {brief.get("date")} · Status: `{brief.get("overall_status")}`
+
+**Executive Summary**
+{brief.get("executive_summary")}
+
+**Top Risks**
+{bullet(brief.get("top_5_risks") or [], "No critical risks found in available data.")}
+
+**Blockers**
+{bullet(brief.get("top_blockers") or [], "No blockers found in available data.")}
+
+**Decisions Needed**
+{bullet(brief.get("decisions_needed") or [], "No management decisions detected in available data.")}
+
+**Suggested Actions**
+{actions or "- No urgent delivery action detected from available data."}
+
+**Data Notes**
+{notes or "- No data gaps detected in available sources."}"""
+
+
 def render_delivery_intelligence_dashboard(report: dict) -> str:
     health = report.get("delivery_health") or {}
     counts = health.get("status_counts") or {}
@@ -1023,6 +1289,7 @@ def render_delivery_intelligence_dashboard(report: dict) -> str:
 
     <div class="actions">
       <a class="button" href="/dashboard">Health dashboard</a>
+      <a class="button" href="/daily-delivery-brief">Daily brief</a>
       <a class="button" href="/api/delivery-intelligence">JSON report</a>
       <a class="button" href="http://localhost:8080/aigile/projects/882d9973-7e7d-4ad7-ba0f-df2f1c28e825/issues/" target="_blank">Open Plane board</a>
     </div>
@@ -4092,13 +4359,23 @@ class Handler(BaseHTTPRequestHandler):
             report = build_health_report()
             html_response(self, 200, render_health_dashboard(report))
             return
-        if parsed.path in {"/delivery-dashboard", "/morning-brief"}:
+        if parsed.path == "/delivery-dashboard":
             report = build_delivery_intelligence_report()
             html_response(self, 200, render_delivery_intelligence_dashboard(report))
+            return
+        if parsed.path in {"/daily-delivery-brief", "/morning-brief"}:
+            report = build_delivery_intelligence_report()
+            brief = build_daily_delivery_brief(report)
+            html_response(self, 200, render_daily_delivery_brief(brief))
             return
         if parsed.path == "/api/delivery-intelligence":
             report = build_delivery_intelligence_report()
             json_response(self, 200, report)
+            return
+        if parsed.path == "/api/daily-delivery-brief":
+            report = build_delivery_intelligence_report()
+            brief = build_daily_delivery_brief(report)
+            json_response(self, 200, brief)
             return
         if parsed.path == "/api/delivery-signals":
             params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
@@ -4186,6 +4463,23 @@ class Handler(BaseHTTPRequestHandler):
                 json_response(self, 400, {"ok": False, "error": str(exc)})
             except Exception as exc:
                 logger.exception("Delivery signal status update failed")
+                json_response(self, 500, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/api/daily-delivery-brief/send":
+            try:
+                payload = read_body(self)
+                channel_id = payload.get("channel_id")
+                if not channel_id:
+                    raise ValueError("channel_id is required")
+                report = build_delivery_intelligence_report()
+                brief = build_daily_delivery_brief(report)
+                message = format_daily_delivery_brief_mattermost(brief)
+                post = post_mattermost_channel_message(channel_id, message)
+                json_response(self, 200, {"ok": True, "status": "sent", "post_id": post.get("id"), "brief": brief})
+            except ValueError as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                logger.exception("Daily delivery brief send failed")
                 json_response(self, 500, {"ok": False, "error": str(exc)})
             return
         if parsed.path == "/api/refresh-knowledge-base":

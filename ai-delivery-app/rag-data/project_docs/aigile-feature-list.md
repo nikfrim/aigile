@@ -32,6 +32,8 @@ Updated: 2026-05-27
 
 - AIGILE backend exposes a delivery management dashboard at `http://localhost:8091/delivery-dashboard`.
 - Machine-readable report is available at `http://localhost:8091/api/delivery-intelligence`.
+- Daily Delivery Brief is available at `http://localhost:8091/daily-delivery-brief`.
+- Machine-readable daily brief is available at `http://localhost:8091/api/daily-delivery-brief`.
 - The dashboard is the Morning Delivery Brief for a Product / Delivery Manager.
 - It uses real available AIGILE signals:
   - Plane issues;
@@ -60,6 +62,18 @@ Updated: 2026-05-27
   - `!question text`;
   - `!action text`.
 - Delivery signals are stored separately from task comments in `delivery-signals.jsonl` and can be marked `open`, `acknowledged`, or `resolved`.
+- Daily Delivery Brief turns the dashboard data into a short management report:
+  - Date;
+  - Overall Status;
+  - Executive Summary;
+  - Top 5 Risks;
+  - Top Blockers;
+  - Decisions Needed;
+  - Requirement Quality Issues;
+  - Changes Since Yesterday;
+  - Suggested Actions for Today.
+- Daily Brief can be posted to Mattermost through `POST /api/daily-delivery-brief/send` with a Mattermost `channel_id`.
+- Daily Brief is data-honest: missing data is reported explicitly instead of being inferred.
 - Historical comparison is explicitly marked unavailable until snapshot history exists.
 - The dashboard does not replace the health index: health index is technical readiness, Delivery Intelligence is management readiness.
 
