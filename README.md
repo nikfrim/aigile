@@ -8,8 +8,10 @@ Local knowledge artifacts for this version:
 
 - `ai-delivery-app/rag-data/project_docs/aigile-feature-list.md`
 - `ai-delivery-app/rag-data/project_docs/aigile-release-notes.md`
+- `ai-delivery-app/rag-data/project_docs/aigile-0.1.1-system-summary.md`
 - `ai-delivery-app/rag-data/project_docs/aigile-0.1.0-system-summary.md`
 - `ai-delivery-app/rag-data/project_docs/aigile-smoke-test-pack.md`
+- `ai-delivery-app/rag-data/project_docs/aigile-task-chat-user-guide.md`
 - `ai-delivery-app/rag-data/decision_log/aigile-0.1.0-product-decisions.md`
 
 ## Services
@@ -19,6 +21,7 @@ Local knowledge artifacts for this version:
 - n8n: http://localhost:5678
 - AIGILE backend: http://localhost:8091
 - Delivery Intelligence Dashboard: http://localhost:8091/delivery-dashboard
+- Daily Delivery Brief: http://localhost:8091/daily-delivery-brief
 - AIGILE RAG backend: http://localhost:8092
 - Qdrant: http://localhost:6333
 - Ollama API: http://localhost:11434

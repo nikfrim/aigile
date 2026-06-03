@@ -45,6 +45,11 @@ Status: in progress
   - JSON endpoint at `http://localhost:8091/api/daily-delivery-brief`;
   - Mattermost send endpoint `POST /api/daily-delivery-brief/send`;
   - executive summary, top risks, blockers, decisions, requirement quality, changes since yesterday, and suggested actions.
+- Documentation refresh:
+  - added `aigile-0.1.1-system-summary.md`;
+  - updated Task Chat guide for delivery signal commands;
+  - updated feature list version to `0.1.1-dev`;
+  - updated README local knowledge index.
 
 ### Next
 

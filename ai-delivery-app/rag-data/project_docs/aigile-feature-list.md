@@ -1,7 +1,7 @@
 # AIGILE Feature List
 
-Version: 0.1.0
-Updated: 2026-05-27
+Version: 0.1.1-dev
+Updated: 2026-06-03
 
 ## Product Baseline
 
