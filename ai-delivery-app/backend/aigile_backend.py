@@ -887,6 +887,26 @@ def issue_ref(key: str | None, title: str | None = None) -> str:
     return f"{key}: {title}" if title else key
 
 
+def issue_key_url(key: str | None, fallback: str | None = None) -> str:
+    if fallback:
+        return fallback
+    if not key or key == "n/a":
+        return "#"
+    return f"http://localhost:8080/aigile/browse/{key}/"
+
+
+def render_brief_issue_link(item: dict) -> str:
+    key = item.get("issue_key")
+    title = item.get("issue_title")
+    if title and len(str(title)) > 80:
+        title = None
+    label = issue_ref(key, title)
+    url = issue_key_url(key, item.get("issue_url") or item.get("url"))
+    if url == "#":
+        return escape(label)
+    return f'<a href="{escape(url)}" target="_blank" rel="noreferrer">{escape(label)}</a>'
+
+
 def clamp_int(value: int | float, minimum: int = 0, maximum: int = 100) -> int:
     return max(minimum, min(maximum, int(round(value))))
 
@@ -992,6 +1012,7 @@ def build_daily_delivery_brief(report: dict | None = None) -> dict:
             "source": risk.get("source") or risk.get("agent") or "unknown",
             "summary": brief_item_text(risk, "risk", "description", fallback="Risk without summary"),
             "suggested_action": risk.get("suggested_action") or "Review with owner.",
+            "issue_url": issue_key_url(risk.get("issue_key"), risk.get("issue_url")),
         })
     for signal in delivery_signals.get("items") or []:
         if signal.get("type") in {"risk", "dependency", "blocker"}:
@@ -1002,6 +1023,7 @@ def build_daily_delivery_brief(report: dict | None = None) -> dict:
                 "source": signal.get("source") or "mattermost_thread",
                 "summary": signal.get("text") or "Meeting/thread signal without summary",
                 "suggested_action": signal.get("suggested_action") or "Review with owner.",
+                "issue_url": issue_key_url(signal.get("related_issue_key")),
             })
     for item in top_risks:
         item["risk_score"] = score_brief_risk(item)
@@ -1016,6 +1038,7 @@ def build_daily_delivery_brief(report: dict | None = None) -> dict:
             "source": item.get("source") or "AI Review",
             "summary": item.get("reason") or item.get("title") or "Blocker without summary",
             "suggested_action": "Decide owner and unblock path today.",
+            "issue_url": issue_key_url(item.get("key"), item.get("url")),
         })
 
     decisions = []
@@ -1026,6 +1049,7 @@ def build_daily_delivery_brief(report: dict | None = None) -> dict:
             "summary": decision.get("decision") or "Decision needed",
             "why": decision.get("why") or "",
             "suggested_action": decision.get("action") or "Make or assign the decision today.",
+            "issue_url": issue_key_url(decision.get("issue_key"), decision.get("issue_url")),
         })
 
     quality_issues = []
@@ -1044,6 +1068,7 @@ def build_daily_delivery_brief(report: dict | None = None) -> dict:
                 "issue_title": item.get("title"),
                 "summary": label,
                 "source": "Plane / AI Review",
+                "issue_url": issue_key_url(item.get("key"), item.get("url")),
             })
 
     data_notes = []
@@ -1110,9 +1135,9 @@ def render_brief_list(items: list[dict], empty: str, fields: tuple[str, ...]) ->
         return f"<li class=\"muted\">{escape(empty)}</li>"
     rows = []
     for item in items:
-        prefix = issue_ref(item.get("issue_key"), item.get("issue_title"))
+        prefix = render_brief_issue_link(item)
         details = " | ".join(str(item.get(field) or "") for field in fields if item.get(field))
-        rows.append(f"<li><strong>{escape(prefix)}</strong><br><span>{escape(details or item.get('summary') or '')}</span></li>")
+        rows.append(f"<li><strong>{prefix}</strong><br><span>{escape(details or item.get('summary') or '')}</span></li>")
     return "".join(rows)
 
 
@@ -1138,13 +1163,14 @@ def render_daily_delivery_brief(brief: dict) -> str:
     drivers = "".join(f"<li>{escape(str(driver))}</li>" for driver in health.get("drivers") or [])
     risk_rows = []
     for risk in brief.get("top_5_risks") or []:
+        issue_link = render_brief_issue_link(risk)
         risk_rows.append(
             f"""
             <tr>
               <td><strong>{escape(str(risk.get("summary") or ""))}</strong><div class="muted small">{escape(str(risk.get("suggested_action") or ""))}</div></td>
               <td>{escape(str(risk.get("severity") or "medium")).upper()}</td>
               <td>{escape(str(risk.get("source") or ""))}</td>
-              <td>{escape(str(risk.get("issue_key") or "n/a"))}</td>
+              <td>{issue_link}</td>
               <td>{escape(str(risk.get("risk_score") or ""))}</td>
             </tr>
             """

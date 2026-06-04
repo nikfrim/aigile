@@ -329,6 +329,7 @@ class DeliveryIntelligenceTests(unittest.TestCase):
         self.assertIn("Kanban Flow Metrics", html)
         self.assertIn("Throughput", html)
         self.assertIn("trend-card", html)
+        self.assertIn('href="http://localhost:8080/aigile/browse/AIGILE-3/"', html)
         self.assertIn("Top AI Risks", html)
         self.assertIn("Requirement Quality Issues", html)
         self.assertIn("Daily Delivery Brief", message)
