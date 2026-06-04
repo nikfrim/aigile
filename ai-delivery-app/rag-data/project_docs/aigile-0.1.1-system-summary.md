@@ -194,6 +194,12 @@ Daily Brief shows:
 - Schedule Confidence;
 - Executive / Kanban / Risks / Team Signals / Data Quality modes;
 - infographic summary cards;
+- executive insight sections:
+  - situation;
+  - business impact;
+  - decision focus;
+  - next 24h;
+  - watchlist;
 - Kanban flow metrics with expandable dynamic explanations:
   - throughput;
   - lead time;

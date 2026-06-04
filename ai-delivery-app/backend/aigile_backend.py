@@ -881,6 +881,67 @@ def build_kanban_metrics(report: dict, health_index: dict) -> dict:
     }
 
 
+def build_executive_insight(
+    health_index: dict,
+    top_risks: list[dict],
+    blockers: list[dict],
+    decisions: list[dict],
+    quality_issues: list[dict],
+    kanban_metrics: dict,
+    source_counts: dict,
+) -> dict:
+    top_risk = top_risks[0] if top_risks else {}
+    top_blocker = blockers[0] if blockers else {}
+    top_decision = decisions[0] if decisions else {}
+    weakest_flow = None
+    for metric in kanban_metrics.get("metrics") or []:
+        trend = metric.get("trend") or {}
+        if trend.get("class") == "bad":
+            weakest_flow = metric
+            break
+    situation = (
+        f"Delivery health is {health_index.get('score')}/100 with schedule confidence {health_index.get('schedule_confidence')}/100. "
+        f"The system sees {source_counts.get('delivery_signals_open') or 0} open team/thread signals, "
+        f"{len(blockers)} blocker(s), and {len(quality_issues)} requirement quality issue(s)."
+    )
+    if health_index.get("score", 100) <= 15:
+        business_impact = "Current delivery state is close to critical: unresolved blockers and unclear requirements can push scope, quality, or demo readiness off track."
+    elif health_index.get("status") == "red":
+        business_impact = "Delivery needs leadership attention before the team can move predictably."
+    else:
+        business_impact = "Delivery is currently manageable, but the visible signals still need regular review."
+    decision_focus = []
+    if top_blocker:
+        decision_focus.append(f"Unblock {top_blocker.get('issue_key') or 'the top blocker'}: {top_blocker.get('summary') or top_blocker.get('issue_title') or 'blocker needs attention'}.")
+    if top_decision:
+        decision_focus.append(f"Make decision for {top_decision.get('issue_key') or 'open decision'}: {top_decision.get('summary') or 'decision needed'}.")
+    if top_risk:
+        decision_focus.append(f"Assign owner for top risk {top_risk.get('issue_key') or ''}: {top_risk.get('summary') or 'risk needs mitigation'}.")
+    next_24h = []
+    if blockers:
+        next_24h.append("Resolve or explicitly accept the top blocker before expanding scope.")
+    if decisions:
+        next_24h.append("Turn open decisions into named owners and deadlines.")
+    if quality_issues:
+        next_24h.append("Refine tasks with missing acceptance criteria before they enter active delivery.")
+    if weakest_flow:
+        next_24h.append(f"Review {weakest_flow.get('label')} trend: {weakest_flow.get('trend', {}).get('label')}.")
+    watchlist = []
+    if weakest_flow:
+        watchlist.append(f"{weakest_flow.get('label')}: {weakest_flow.get('value')}{weakest_flow.get('unit')} ({weakest_flow.get('trend', {}).get('label')})")
+    if top_risk:
+        watchlist.append(f"Top risk: {top_risk.get('issue_key') or 'n/a'}")
+    if source_counts.get("delivery_signals_open"):
+        watchlist.append(f"Open team signals: {source_counts.get('delivery_signals_open')}")
+    return {
+        "situation": situation,
+        "business_impact": business_impact,
+        "decision_focus": decision_focus[:3] or ["No immediate leadership decision detected from available data."],
+        "next_24h": next_24h[:4] or ["Keep monitoring current delivery signals."],
+        "watchlist": watchlist[:4] or ["No watchlist items detected."],
+    }
+
+
 def issue_ref(key: str | None, title: str | None = None) -> str:
     if not key:
         return title or "n/a"
@@ -1099,6 +1160,21 @@ def build_daily_delivery_brief(report: dict | None = None) -> dict:
     else:
         executive_summary = f"Project health looks healthy ({health_index['score']}/100). {executive_summary}"
     kanban_metrics = build_kanban_metrics(report, health_index)
+    source_counts = {
+        "reviewed_total": (report.get("delivery_health") or {}).get("reviewed_total") or 0,
+        "unreviewed_total": (report.get("delivery_health") or {}).get("unreviewed_total") or 0,
+        "delivery_signals_total": delivery_signals.get("total") or 0,
+        "delivery_signals_open": delivery_signals.get("open") or 0,
+    }
+    executive_insight = build_executive_insight(
+        health_index,
+        top_risks[:5],
+        blockers[:5],
+        decisions[:5],
+        quality_issues[:10],
+        kanban_metrics,
+        source_counts,
+    )
 
     return {
         "ok": True,
@@ -1110,6 +1186,7 @@ def build_daily_delivery_brief(report: dict | None = None) -> dict:
         "kanban_metrics": kanban_metrics,
         "analytics_modes": ["Executive", "Kanban", "Risks", "Team Signals", "Data Quality"],
         "executive_summary": executive_summary,
+        "executive_insight": executive_insight,
         "top_5_risks": top_risks[:5],
         "top_blockers": blockers[:5],
         "decisions_needed": decisions[:5],
@@ -1120,12 +1197,7 @@ def build_daily_delivery_brief(report: dict | None = None) -> dict:
         },
         "suggested_actions_for_today": actions[:5] or ["No urgent delivery action detected from available data."],
         "data_notes": data_notes,
-        "source_counts": {
-            "reviewed_total": (report.get("delivery_health") or {}).get("reviewed_total") or 0,
-            "unreviewed_total": (report.get("delivery_health") or {}).get("unreviewed_total") or 0,
-            "delivery_signals_total": delivery_signals.get("total") or 0,
-            "delivery_signals_open": delivery_signals.get("open") or 0,
-        },
+        "source_counts": source_counts,
         "source_report_created_at": report.get("created_at"),
     }
 
@@ -1181,6 +1253,10 @@ def render_daily_delivery_brief(brief: dict) -> str:
     decision_count = len(brief.get("decisions_needed") or [])
     quality_count = len(brief.get("requirement_quality_issues") or [])
     source_counts = brief.get("source_counts") or {}
+    insight = brief.get("executive_insight") or {}
+    decision_focus = "".join(f"<li>{escape(str(item))}</li>" for item in insight.get("decision_focus") or [])
+    next_24h = "".join(f"<li>{escape(str(item))}</li>" for item in insight.get("next_24h") or [])
+    watchlist = "".join(f"<li>{escape(str(item))}</li>" for item in insight.get("watchlist") or [])
     kanban = brief.get("kanban_metrics") or {}
     trend_cards = []
     for metric in kanban.get("metrics") or []:
@@ -1244,6 +1320,13 @@ def render_daily_delivery_brief(brief: dict) -> str:
     .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
     .hero {{ display: grid; grid-template-columns: minmax(260px, 0.85fr) 1.15fr; gap: 14px; align-items: stretch; }}
     .index-card {{ display: grid; grid-template-columns: 150px 1fr; gap: 16px; align-items: center; }}
+    .summary-card {{ display: grid; gap: 12px; }}
+    .summary-lead {{ font-size: 15px; color: var(--text); }}
+    .summary-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
+    .summary-box {{ background: #1d222b; border: 1px solid var(--line); border-radius: 8px; padding: 12px; }}
+    .summary-box h3 {{ margin: 0 0 8px; font-size: 13px; color: var(--muted); letter-spacing: 0; }}
+    .summary-box ul {{ padding-left: 18px; }}
+    .summary-box li {{ font-size: 13px; }}
     .gauge {{
       width: 140px;
       aspect-ratio: 1;
@@ -1290,7 +1373,7 @@ def render_daily_delivery_brief(brief: dict) -> str:
     tr:last-child td {{ border-bottom: none; }}
     .actions {{ display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }}
     .button {{ display: inline-flex; border: 1px solid var(--line); background: #1d222b; color: var(--text); border-radius: 8px; padding: 9px 12px; font-size: 14px; }}
-    @media (max-width: 900px) {{ header, .grid, .hero, .metric-grid, .trend-grid {{ display: block; }} .index-card {{ grid-template-columns: 1fr; }} .metric, details.trend-card {{ margin-bottom: 10px; }} }}
+    @media (max-width: 900px) {{ header, .grid, .hero, .metric-grid, .trend-grid, .summary-grid {{ display: block; }} .index-card {{ grid-template-columns: 1fr; }} .metric, details.trend-card, .summary-box {{ margin-bottom: 10px; }} }}
   </style>
 </head>
 <body>
@@ -1317,11 +1400,29 @@ def render_daily_delivery_brief(brief: dict) -> str:
           <ul>{drivers}</ul>
         </div>
       </section>
-      <section>
+      <section class="summary-card">
         <h2>Executive Summary</h2>
-        <p>{escape(str(brief.get("executive_summary") or ""))}</p>
-        <div class="bar" aria-label="Schedule confidence {schedule_score} of 100"><i></i></div>
-        <p class="small">Schedule confidence: {escape(str(schedule_score))}/100. {escape(str(health.get("schedule_summary") or ""))}</p>
+        <p class="summary-lead">{escape(str(insight.get("situation") or brief.get("executive_summary") or ""))}</p>
+        <div class="summary-box">
+          <h3>Business impact</h3>
+          <p>{escape(str(insight.get("business_impact") or ""))}</p>
+          <div class="bar" aria-label="Schedule confidence {schedule_score} of 100"><i></i></div>
+          <p class="small">Schedule confidence: {escape(str(schedule_score))}/100. {escape(str(health.get("schedule_summary") or ""))}</p>
+        </div>
+        <div class="summary-grid">
+          <div class="summary-box">
+            <h3>Decision focus</h3>
+            <ul>{decision_focus}</ul>
+          </div>
+          <div class="summary-box">
+            <h3>Next 24h</h3>
+            <ul>{next_24h}</ul>
+          </div>
+        </div>
+        <div class="summary-box">
+          <h3>Watchlist</h3>
+          <ul>{watchlist}</ul>
+        </div>
       </section>
     </div>
 

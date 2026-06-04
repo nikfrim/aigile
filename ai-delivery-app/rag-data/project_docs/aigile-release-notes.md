@@ -48,6 +48,12 @@ Status: in progress
   - Schedule Confidence indicator;
   - Executive / Kanban / Risks / Team Signals / Data Quality modes;
   - infographic cards for management demo;
+  - executive insight sections for leadership sync:
+    - situation;
+    - business impact;
+    - decision focus;
+    - next 24h;
+    - watchlist;
   - Kanban flow metrics with expandable dynamic explanations:
     - throughput;
     - lead time;

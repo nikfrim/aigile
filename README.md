@@ -237,6 +237,7 @@ Use it after the health dashboard when you want to show delivery-level signals:
 - schedule confidence based on current risks and blockers;
 - several brief modes: Executive, Risks, Team Signals, Data Quality;
 - infographic-style management summary for live demo;
+- executive insight: situation, business impact, decision focus, next 24h, watchlist;
 - Kanban flow metrics: throughput, lead time, cycle time, WIP, blocked time, flow efficiency, WIP aging, rework rate;
 - green/red direction indicators for metric movement versus previous leadership sync;
 - expandable metric history for director sync discussions;

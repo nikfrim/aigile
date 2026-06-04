@@ -40,6 +40,7 @@ Updated: 2026-06-03
   - Schedule Confidence;
   - Executive / Kanban / Risks / Team Signals / Data Quality modes;
   - infographic summary cards;
+  - executive insight sections: situation, business impact, decision focus, next 24h, watchlist;
   - AI-ranked top risks table;
   - Kanban flow metrics: throughput, lead time, cycle time, WIP, blocked time, flow efficiency, WIP aging, rework rate;
   - green/red direction indicators for metric movement versus previous leadership sync;

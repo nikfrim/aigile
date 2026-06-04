@@ -250,6 +250,8 @@ class DeliveryIntelligenceTests(unittest.TestCase):
         self.assertIn("schedule_confidence", brief["health_index"])
         self.assertIn("kanban_metrics", brief)
         self.assertGreaterEqual(len(brief["kanban_metrics"]["metrics"]), 4)
+        self.assertIn("executive_insight", brief)
+        self.assertIn("decision_focus", brief["executive_insight"])
         self.assertIn("yellow AI review", brief["executive_summary"])
         self.assertEqual(brief["top_5_risks"][0]["summary"], "Scope can slip")
         self.assertIn("risk_score", brief["top_5_risks"][0])
@@ -287,6 +289,13 @@ class DeliveryIntelligenceTests(unittest.TestCase):
             "project": "AIGILE Platform",
             "overall_status": "red",
             "executive_summary": "A blocker needs attention.",
+            "executive_insight": {
+                "situation": "Delivery health is near critical.",
+                "business_impact": "Demo readiness can slip.",
+                "decision_focus": ["Unblock AIGILE-3."],
+                "next_24h": ["Assign owner."],
+                "watchlist": ["Blocked time."],
+            },
             "top_5_risks": [],
             "top_blockers": [{"issue_key": "AIGILE-3", "summary": "No access", "severity": "critical", "source": "mattermost_thread"}],
             "decisions_needed": [],
@@ -324,6 +333,9 @@ class DeliveryIntelligenceTests(unittest.TestCase):
 
         self.assertIn("Daily Delivery Brief", html)
         self.assertIn("Executive Summary", html)
+        self.assertIn("Business impact", html)
+        self.assertIn("Decision focus", html)
+        self.assertIn("Next 24h", html)
         self.assertIn("Project Health Index", html)
         self.assertIn("Near Critical", html)
         self.assertIn("Kanban Flow Metrics", html)
