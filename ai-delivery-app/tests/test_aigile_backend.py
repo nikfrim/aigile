@@ -245,11 +245,34 @@ class DeliveryIntelligenceTests(unittest.TestCase):
 
         self.assertTrue(brief["ok"])
         self.assertEqual(brief["overall_status"], "yellow")
+        self.assertIn("health_index", brief)
+        self.assertLess(brief["health_index"]["score"], 100)
+        self.assertIn("schedule_confidence", brief["health_index"])
         self.assertIn("yellow AI review", brief["executive_summary"])
         self.assertEqual(brief["top_5_risks"][0]["summary"], "Scope can slip")
+        self.assertIn("risk_score", brief["top_5_risks"][0])
         self.assertEqual(brief["requirement_quality_issues"][0]["issue_key"], "AIGILE-2")
         self.assertIn("No meeting/thread signals available.", brief["data_notes"])
         self.assertIn("Historical comparison is not available yet.", brief["data_notes"])
+
+    def test_health_index_turns_red_for_blockers_and_critical_signals(self):
+        report = {
+            "delivery_health": {"unreviewed_total": 3, "status_counts": {"red": 1, "yellow": 2, "green": 0}},
+            "blockers": [{"key": "AIGILE-1"}],
+            "top_risks": [{"severity": "critical"}],
+            "delivery_signals": {"open": 1, "items": [{"severity": "critical", "type": "blocker"}]},
+            "requirement_quality": {
+                "without_acceptance_criteria": {"count": 2},
+                "without_type_label": {"count": 1},
+                "missing_info": {"count": 1},
+            },
+        }
+
+        health = aigile_backend.build_health_index(report)
+
+        self.assertEqual(health["status"], "red")
+        self.assertLess(health["score"], 55)
+        self.assertLess(health["schedule_confidence"], 55)
 
     def test_daily_delivery_brief_render_and_mattermost_format(self):
         brief = {
@@ -272,6 +295,8 @@ class DeliveryIntelligenceTests(unittest.TestCase):
 
         self.assertIn("Daily Delivery Brief", html)
         self.assertIn("Executive Summary", html)
+        self.assertIn("Project Health Index", html)
+        self.assertIn("Top AI Risks", html)
         self.assertIn("Requirement Quality Issues", html)
         self.assertIn("Daily Delivery Brief", message)
         self.assertIn("AIGILE-3", message)

@@ -190,9 +190,13 @@ POST /api/daily-delivery-brief/send
 Daily Brief shows:
 
 - Date;
+- Project Health Index;
+- Schedule Confidence;
+- Executive / Risks / Team Signals / Data Quality modes;
+- infographic summary cards;
 - Overall Status;
 - Executive Summary;
-- Top 5 Risks;
+- AI-ranked Top 5 Risks;
 - Top Blockers;
 - Decisions Needed;
 - Requirement Quality Issues;
@@ -201,6 +205,8 @@ Daily Brief shows:
 - Data Notes.
 
 The brief is data-honest. It does not invent facts. If a source has no data, the brief says so explicitly.
+
+Project Health Index is intentionally simple and explainable for a live manager demo. It reacts to blockers, red/yellow AI reviews, weak requirements, missing task types, open Mattermost delivery signals, and top risks. Schedule Confidence is derived from the same signal set and should be treated as an attention indicator, not as a formal project forecast.
 
 Examples:
 

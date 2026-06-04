@@ -35,6 +35,12 @@ Updated: 2026-06-03
 - Daily Delivery Brief is available at `http://localhost:8091/daily-delivery-brief`.
 - Machine-readable daily brief is available at `http://localhost:8091/api/daily-delivery-brief`.
 - The dashboard is the Morning Delivery Brief for a Product / Delivery Manager.
+- Daily Brief now has an executive analytics layer:
+  - Project Health Index;
+  - Schedule Confidence;
+  - Executive / Risks / Team Signals / Data Quality modes;
+  - infographic summary cards;
+  - AI-ranked top risks table.
 - It uses real available AIGILE signals:
   - Plane issues;
   - latest AI Review history;
@@ -64,9 +70,11 @@ Updated: 2026-06-03
 - Delivery signals are stored separately from task comments in `delivery-signals.jsonl` and can be marked `open`, `acknowledged`, or `resolved`.
 - Daily Delivery Brief turns the dashboard data into a short management report:
   - Date;
+  - Project Health Index;
+  - Schedule Confidence;
   - Overall Status;
   - Executive Summary;
-  - Top 5 Risks;
+  - AI-ranked Top 5 Risks;
   - Top Blockers;
   - Decisions Needed;
   - Requirement Quality Issues;
@@ -75,7 +83,7 @@ Updated: 2026-06-03
 - Daily Brief can be posted to Mattermost through `POST /api/daily-delivery-brief/send` with a Mattermost `channel_id`.
 - Daily Brief is data-honest: missing data is reported explicitly instead of being inferred.
 - Historical comparison is explicitly marked unavailable until snapshot history exists.
-- The dashboard does not replace the health index: health index is technical readiness, Delivery Intelligence is management readiness.
+- The technical health dashboard still checks infrastructure readiness. The Daily Brief Health Index is management readiness: it reacts to blockers, bugs, red/yellow AI reviews, weak requirements, and Mattermost delivery signals.
 
 ## Live Demo Seed / Reset
 

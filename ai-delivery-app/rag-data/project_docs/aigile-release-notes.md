@@ -44,6 +44,11 @@ Status: in progress
   - page at `http://localhost:8091/daily-delivery-brief`;
   - JSON endpoint at `http://localhost:8091/api/daily-delivery-brief`;
   - Mattermost send endpoint `POST /api/daily-delivery-brief/send`;
+  - executive Project Health Index;
+  - Schedule Confidence indicator;
+  - Executive / Risks / Team Signals / Data Quality modes;
+  - infographic cards for management demo;
+  - AI-ranked top risks from AI Review and Mattermost delivery signals;
   - executive summary, top risks, blockers, decisions, requirement quality, changes since yesterday, and suggested actions.
 - Documentation refresh:
   - added `aigile-0.1.1-system-summary.md`;

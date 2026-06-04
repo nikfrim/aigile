@@ -761,6 +761,98 @@ def issue_ref(key: str | None, title: str | None = None) -> str:
     return f"{key}: {title}" if title else key
 
 
+def clamp_int(value: int | float, minimum: int = 0, maximum: int = 100) -> int:
+    return max(minimum, min(maximum, int(round(value))))
+
+
+def severity_points(severity: str | None) -> int:
+    return {
+        "critical": 18,
+        "high": 12,
+        "medium": 6,
+        "low": 2,
+    }.get(str(severity or "").lower(), 4)
+
+
+def build_health_index(report: dict) -> dict:
+    health = report.get("delivery_health") or {}
+    counts = health.get("status_counts") or {}
+    rq = report.get("requirement_quality") or {}
+    delivery_signals = report.get("delivery_signals") or {}
+    red = int(counts.get("red") or 0)
+    yellow = int(counts.get("yellow") or 0)
+    unreviewed = int(health.get("unreviewed_total") or 0)
+    blockers_count = len(report.get("blockers") or [])
+    risks = report.get("top_risks") or []
+    open_signals = delivery_signals.get("items") or []
+    missing_ac = int((rq.get("without_acceptance_criteria") or {}).get("count") or 0)
+    missing_type = int((rq.get("without_type_label") or {}).get("count") or 0)
+    missing_info = int((rq.get("missing_info") or {}).get("count") or 0)
+    risk_penalty = sum(severity_points(risk.get("severity")) for risk in risks[:8])
+    signal_penalty = sum(severity_points(signal.get("severity")) for signal in open_signals[:8])
+    score = 100
+    score -= red * 14
+    score -= yellow * 5
+    score -= blockers_count * 12
+    score -= unreviewed * 2
+    score -= missing_ac * 3
+    score -= missing_type * 2
+    score -= missing_info * 2
+    score -= min(24, risk_penalty)
+    score -= min(22, signal_penalty)
+    score = clamp_int(score, 5, 100)
+    status = "green" if score >= 80 else "yellow" if score >= 55 else "red"
+    schedule_confidence = clamp_int(
+        100 - blockers_count * 18 - red * 10 - yellow * 4 - min(30, risk_penalty) - unreviewed * 2,
+        5,
+        100,
+    )
+    schedule_status = "green" if schedule_confidence >= 80 else "yellow" if schedule_confidence >= 55 else "red"
+    drivers = []
+    if blockers_count:
+        drivers.append(f"{blockers_count} blocker(s) or red impediment(s)")
+    if red:
+        drivers.append(f"{red} red AI review task(s)")
+    if yellow:
+        drivers.append(f"{yellow} yellow AI review task(s)")
+    if unreviewed:
+        drivers.append(f"{unreviewed} task(s) without AI review")
+    if missing_ac:
+        drivers.append(f"{missing_ac} task(s) may miss acceptance criteria")
+    if delivery_signals.get("open"):
+        drivers.append(f"{delivery_signals.get('open')} open meeting/thread signal(s)")
+    if not drivers:
+        drivers.append("No major negative signals in available data")
+    if schedule_confidence < 55:
+        schedule_summary = "Schedule is at risk based on blockers, red reviews, and open risks."
+    elif schedule_confidence < 80:
+        schedule_summary = "Schedule needs attention: some risks or unclear tasks may affect delivery."
+    else:
+        schedule_summary = "Schedule confidence looks healthy based on available signals."
+    return {
+        "score": score,
+        "status": status,
+        "label": "Healthy" if status == "green" else "Needs attention" if status == "yellow" else "At risk",
+        "drivers": drivers[:6],
+        "schedule_confidence": schedule_confidence,
+        "schedule_status": schedule_status,
+        "schedule_summary": schedule_summary,
+        "formula": "100 - blockers - red/yellow reviews - open risks - missing AC/type - unreviewed work",
+    }
+
+
+def score_brief_risk(item: dict) -> int:
+    source = str(item.get("source") or "").lower()
+    score = severity_points(item.get("severity"))
+    if item.get("issue_key"):
+        score += 2
+    if "mattermost" in source or "thread" in source:
+        score += 4
+    if "blocker" in str(item.get("summary") or "").lower():
+        score += 4
+    return score
+
+
 def build_daily_delivery_brief(report: dict | None = None) -> dict:
     report = report or build_delivery_intelligence_report()
     rq = report.get("requirement_quality") or {}
@@ -775,6 +867,19 @@ def build_daily_delivery_brief(report: dict | None = None) -> dict:
             "summary": brief_item_text(risk, "risk", "description", fallback="Risk without summary"),
             "suggested_action": risk.get("suggested_action") or "Review with owner.",
         })
+    for signal in delivery_signals.get("items") or []:
+        if signal.get("type") in {"risk", "dependency", "blocker"}:
+            top_risks.append({
+                "issue_key": signal.get("related_issue_key"),
+                "issue_title": signal.get("module") or "",
+                "severity": signal.get("severity") or "medium",
+                "source": signal.get("source") or "mattermost_thread",
+                "summary": signal.get("text") or "Meeting/thread signal without summary",
+                "suggested_action": signal.get("suggested_action") or "Review with owner.",
+            })
+    for item in top_risks:
+        item["risk_score"] = score_brief_risk(item)
+    top_risks = sorted(top_risks, key=lambda item: item.get("risk_score") or 0, reverse=True)
 
     blockers = []
     for item in report.get("blockers") or []:
@@ -833,6 +938,13 @@ def build_daily_delivery_brief(report: dict | None = None) -> dict:
     executive_summary = " ".join(findings[:3]).strip()
     if not executive_summary:
         executive_summary = "No urgent delivery action detected from available data."
+    health_index = build_health_index(report)
+    if health_index["status"] == "red":
+        executive_summary = f"Project health is at risk ({health_index['score']}/100). {executive_summary}"
+    elif health_index["status"] == "yellow":
+        executive_summary = f"Project health needs attention ({health_index['score']}/100). {executive_summary}"
+    else:
+        executive_summary = f"Project health looks healthy ({health_index['score']}/100). {executive_summary}"
 
     return {
         "ok": True,
@@ -840,6 +952,8 @@ def build_daily_delivery_brief(report: dict | None = None) -> dict:
         "created_at": utc_now_iso(),
         "project": report.get("project") or "AIGILE",
         "overall_status": report.get("overall_status") or "unknown",
+        "health_index": health_index,
+        "analytics_modes": ["Executive", "Risks", "Team Signals", "Data Quality"],
         "executive_summary": executive_summary,
         "top_5_risks": top_risks[:5],
         "top_blockers": blockers[:5],
@@ -877,6 +991,33 @@ def render_daily_delivery_brief(brief: dict) -> str:
     if not notes:
         notes = '<li>No data gaps detected in available sources.</li>'
     actions = "".join(f"<li>{escape(str(action))}</li>" for action in brief.get("suggested_actions_for_today") or [])
+    health = brief.get("health_index") or {}
+    health_score = int(health.get("score") or 0)
+    schedule_score = int(health.get("schedule_confidence") or 0)
+    mode_links = "".join(
+        f'<a class="mode" href="#{escape(str(mode).lower().replace(" ", "-"))}">{escape(str(mode))}</a>'
+        for mode in brief.get("analytics_modes") or ["Executive", "Risks", "Team Signals", "Data Quality"]
+    )
+    drivers = "".join(f"<li>{escape(str(driver))}</li>" for driver in health.get("drivers") or [])
+    risk_rows = []
+    for risk in brief.get("top_5_risks") or []:
+        risk_rows.append(
+            f"""
+            <tr>
+              <td><strong>{escape(str(risk.get("summary") or ""))}</strong><div class="muted small">{escape(str(risk.get("suggested_action") or ""))}</div></td>
+              <td>{escape(str(risk.get("severity") or "medium")).upper()}</td>
+              <td>{escape(str(risk.get("source") or ""))}</td>
+              <td>{escape(str(risk.get("issue_key") or "n/a"))}</td>
+              <td>{escape(str(risk.get("risk_score") or ""))}</td>
+            </tr>
+            """
+        )
+    if not risk_rows:
+        risk_rows.append('<tr><td colspan="5" class="muted">No critical risks found in available data.</td></tr>')
+    blocker_count = len(brief.get("top_blockers") or [])
+    decision_count = len(brief.get("decisions_needed") or [])
+    quality_count = len(brief.get("requirement_quality_issues") or [])
+    source_counts = brief.get("source_counts") or {}
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -895,14 +1036,15 @@ def render_daily_delivery_brief(brief: dict) -> str:
       --yellow: #f0c94a;
       --red: #ff5d5d;
       --blue: #78b7ff;
+      --purple: #b79cff;
     }}
     body {{ margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }}
-    main {{ max-width: 980px; margin: 0 auto; padding: 32px 20px 56px; }}
+    main {{ max-width: 1180px; margin: 0 auto; padding: 32px 20px 56px; }}
     header {{ display: flex; justify-content: space-between; align-items: flex-end; gap: 20px; margin-bottom: 20px; }}
     h1 {{ margin: 0 0 8px; font-size: 30px; letter-spacing: 0; }}
     h2 {{ margin: 0 0 12px; font-size: 18px; }}
     p {{ color: var(--muted); margin: 0; line-height: 1.5; }}
-    section {{ background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-bottom: 14px; }}
+    section, .panel {{ background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-bottom: 14px; }}
     ul {{ margin: 0; padding-left: 20px; }}
     li {{ margin: 8px 0; }}
     a {{ color: var(--blue); text-decoration: none; }}
@@ -911,10 +1053,45 @@ def render_daily_delivery_brief(brief: dict) -> str:
     .badge.yellow {{ color: var(--yellow); border-color: var(--yellow); }}
     .badge.red {{ color: var(--red); border-color: var(--red); }}
     .muted {{ color: var(--muted); }}
+    .small {{ font-size: 12px; margin-top: 4px; }}
     .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
+    .hero {{ display: grid; grid-template-columns: minmax(260px, 0.85fr) 1.15fr; gap: 14px; align-items: stretch; }}
+    .index-card {{ display: grid; grid-template-columns: 150px 1fr; gap: 16px; align-items: center; }}
+    .gauge {{
+      width: 140px;
+      aspect-ratio: 1;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: conic-gradient(var(--blue) 0 {health_score}%, #2a3039 {health_score}% 100%);
+      box-shadow: inset 0 0 0 1px var(--line);
+    }}
+    .gauge-inner {{
+      width: 104px;
+      aspect-ratio: 1;
+      border-radius: 50%;
+      background: var(--panel);
+      display: grid;
+      place-items: center;
+      text-align: center;
+      border: 1px solid var(--line);
+    }}
+    .gauge strong {{ font-size: 30px; line-height: 1; }}
+    .metric-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }}
+    .metric {{ background: #1d222b; border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-height: 82px; }}
+    .metric span {{ color: var(--muted); font-size: 12px; }}
+    .metric strong {{ display: block; margin-top: 8px; font-size: 24px; }}
+    .bar {{ height: 10px; background: #2a3039; border-radius: 999px; overflow: hidden; margin-top: 10px; }}
+    .bar > i {{ display: block; height: 100%; width: {schedule_score}%; background: var(--purple); }}
+    .modes {{ display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }}
+    .mode {{ border: 1px solid var(--line); background: #1d222b; color: var(--text); border-radius: 999px; padding: 8px 11px; font-size: 13px; }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    th, td {{ padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; font-size: 13px; }}
+    th {{ color: var(--muted); font-weight: 700; }}
+    tr:last-child td {{ border-bottom: none; }}
     .actions {{ display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }}
     .button {{ display: inline-flex; border: 1px solid var(--line); background: #1d222b; color: var(--text); border-radius: 8px; padding: 9px 12px; font-size: 14px; }}
-    @media (max-width: 760px) {{ header, .grid {{ display: block; }} }}
+    @media (max-width: 900px) {{ header, .grid, .hero, .metric-grid {{ display: block; }} .index-card {{ grid-template-columns: 1fr; }} .metric {{ margin-bottom: 10px; }} }}
   </style>
 </head>
 <body>
@@ -927,14 +1104,50 @@ def render_daily_delivery_brief(brief: dict) -> str:
       {status_badge(str(brief.get("overall_status") or "unknown"))}
     </header>
 
+    <nav class="modes" aria-label="Brief modes">{mode_links}</nav>
+
+    <div class="hero" id="executive">
+      <section class="index-card">
+        <div class="gauge" aria-label="Project Health Index {health_score} of 100">
+          <div class="gauge-inner"><strong>{escape(str(health_score))}</strong><span class="muted">/100</span></div>
+        </div>
+        <div>
+          <h2>Project Health Index</h2>
+          <p>{escape(str(health.get("label") or ""))}. {escape(str(health.get("formula") or ""))}.</p>
+          <ul>{drivers}</ul>
+        </div>
+      </section>
+      <section>
+        <h2>Executive Summary</h2>
+        <p>{escape(str(brief.get("executive_summary") or ""))}</p>
+        <div class="bar" aria-label="Schedule confidence {schedule_score} of 100"><i></i></div>
+        <p class="small">Schedule confidence: {escape(str(schedule_score))}/100. {escape(str(health.get("schedule_summary") or ""))}</p>
+      </section>
+    </div>
+
+    <div class="metric-grid">
+      <div class="metric"><span>Open Thread Signals</span><strong>{escape(str(source_counts.get("delivery_signals_open") or 0))}</strong></div>
+      <div class="metric"><span>Top Blockers</span><strong>{escape(str(blocker_count))}</strong></div>
+      <div class="metric"><span>Decisions Needed</span><strong>{escape(str(decision_count))}</strong></div>
+      <div class="metric"><span>Quality Issues</span><strong>{escape(str(quality_count))}</strong></div>
+    </div>
+
     <section>
-      <h2>Executive Summary</h2>
-      <p>{escape(str(brief.get("executive_summary") or ""))}</p>
+      <h2>Transparency Sources</h2>
+      <p>Signals combine AI Review, Plane issues, Mattermost task threads, and explicit meeting/thread commands. This is meant to reduce manual reporting and make delivery risks visible early.</p>
     </section>
 
-    <div class="grid">
+    <section id="risks">
+      <h2>Top AI Risks</h2>
+      <table>
+        <thead><tr><th>Risk</th><th>Severity</th><th>Source</th><th>Issue</th><th>AI score</th></tr></thead>
+        <tbody>{''.join(risk_rows)}</tbody>
+      </table>
+    </section>
+
+    <div class="grid" id="team-signals">
       <section>
-        <h2>Top 5 Risks</h2>
+        <h2>Top 5 Risks Summary</h2>
         <ul>{render_brief_list(brief.get("top_5_risks") or [], "No critical risks found in available data.", ("severity", "source", "summary", "suggested_action"))}</ul>
       </section>
       <section>
@@ -943,7 +1156,7 @@ def render_daily_delivery_brief(brief: dict) -> str:
       </section>
     </div>
 
-    <div class="grid">
+    <div class="grid" id="data-quality">
       <section>
         <h2>Decisions Needed</h2>
         <ul>{render_brief_list(brief.get("decisions_needed") or [], "No management decisions detected in available data.", ("summary", "why", "suggested_action"))}</ul>
@@ -992,8 +1205,17 @@ def format_daily_delivery_brief_mattermost(brief: dict) -> str:
 
     actions = "\n".join(f"- {action}" for action in brief.get("suggested_actions_for_today") or [])
     notes = "\n".join(f"- {note}" for note in brief.get("data_notes") or [])
+    health = brief.get("health_index") or {}
+    health_line = ""
+    if health:
+        health_line = (
+            f"\n**Project Health**\n"
+            f"- Health Index: `{health.get('score')}/100` ({health.get('label') or health.get('status')})\n"
+            f"- Schedule confidence: `{health.get('schedule_confidence')}/100` ({health.get('schedule_status')})\n"
+        )
     return f"""**Daily Delivery Brief** · {brief.get("date")} · Status: `{brief.get("overall_status")}`
 
+{health_line}
 **Executive Summary**
 {brief.get("executive_summary")}
 

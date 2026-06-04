@@ -233,10 +233,14 @@ http://localhost:8091/api/daily-delivery-brief
 
 Use it after the health dashboard when you want to show delivery-level signals:
 
+- executive Project Health Index;
+- schedule confidence based on current risks and blockers;
+- several brief modes: Executive, Risks, Team Signals, Data Quality;
+- infographic-style management summary for live demo;
 - overall delivery status;
 - reviewed vs unreviewed work items;
 - green/yellow/red AI Review counts;
-- top risks from AI review findings;
+- AI-ranked top risks from AI review findings and team discussion signals;
 - blockers and unresolved red items;
 - requirement quality signals;
 - module signals;
@@ -246,7 +250,7 @@ Use it after the health dashboard when you want to show delivery-level signals:
 - daily delivery brief for interviews and morning management review;
 - suggested actions for today.
 
-The dashboard is intentionally honest: unavailable historical comparison is shown as unavailable instead of being faked.
+The dashboard is intentionally honest: unavailable historical comparison is shown as unavailable instead of being faked. Project Health Index is a simple explainable score, not a forecast engine: it reacts to blockers, red/yellow reviews, weak requirements, open thread signals, and AI-ranked risks.
 
 Manual check:
 
