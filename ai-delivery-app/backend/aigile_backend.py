@@ -646,10 +646,7 @@ def build_delivery_intelligence_report() -> dict:
         elif signal_type == "action_item":
             action_items.append(signal_item)
 
-    has_critical_signal = any(
-        signal.get("type") == "blocker" or signal.get("severity") == "critical"
-        for signal in open_signals
-    )
+    has_critical_signal = any(signal.get("severity") == "critical" for signal in open_signals)
     red = status_counts["red"]
     yellow = status_counts["yellow"]
     overall = "red" if red or has_critical_signal else "yellow" if yellow or unreviewed or open_signals else "green"
@@ -1322,8 +1319,9 @@ def render_daily_delivery_brief(brief: dict) -> str:
     .healthy-alert h2 {{ color: var(--green); }}
     .muted {{ color: var(--muted); }}
     .small {{ font-size: 12px; margin-top: 4px; }}
-    .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
-    .hero {{ display: grid; grid-template-columns: minmax(260px, 0.85fr) 1.15fr; gap: 14px; align-items: stretch; }}
+    .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }}
+    .grid > section {{ align-self: start; }}
+    .hero {{ display: grid; grid-template-columns: minmax(260px, 0.85fr) 1.15fr; gap: 14px; align-items: start; }}
     .index-card {{ display: grid; grid-template-columns: 150px 1fr; gap: 16px; align-items: center; }}
     .summary-card {{ display: grid; gap: 12px; }}
     .summary-lead {{ font-size: 15px; color: var(--text); }}
@@ -1365,12 +1363,12 @@ def render_daily_delivery_brief(brief: dict) -> str:
     .mode {{ border: 1px solid var(--line); background: #1d222b; color: var(--text); border-radius: 999px; padding: 8px 11px; font-size: 13px; }}
     .trend-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }}
     details.trend-card {{ background: #1d222b; border: 1px solid var(--line); border-radius: 8px; padding: 12px; }}
-    details.trend-card summary {{ cursor: pointer; list-style: none; display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }}
+    details.trend-card summary {{ cursor: pointer; list-style: none; display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; flex-wrap: wrap; }}
     details.trend-card summary::-webkit-details-marker {{ display: none; }}
     .metric-label {{ display: block; color: var(--muted); font-size: 12px; margin-bottom: 8px; }}
     .trend-card strong {{ font-size: 24px; }}
     .trend-card small {{ font-size: 13px; color: var(--muted); margin-left: 3px; }}
-    .trend {{ border-radius: 999px; padding: 4px 8px; font-size: 12px; font-weight: 800; white-space: nowrap; background: transparent; }}
+    .trend {{ border-radius: 999px; padding: 4px 8px; font-size: 12px; font-weight: 800; white-space: normal; text-align: center; max-width: 100%; background: transparent; }}
     .trend.good {{ color: var(--green); border: 1px solid rgba(36, 195, 107, 0.5); }}
     .trend.bad {{ color: var(--red); border: 1px solid rgba(255, 93, 93, 0.55); }}
     .trend.neutral {{ color: var(--muted); border: 1px solid var(--line); }}
