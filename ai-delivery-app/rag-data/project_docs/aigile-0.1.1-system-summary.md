@@ -194,7 +194,15 @@ Daily Brief shows:
 - Schedule Confidence;
 - Executive / Kanban / Risks / Team Signals / Data Quality modes;
 - infographic summary cards;
-- Kanban trend cards with expandable dynamic explanations;
+- Kanban flow metrics with expandable dynamic explanations:
+  - throughput;
+  - lead time;
+  - cycle time;
+  - WIP;
+  - blocked time;
+  - flow efficiency;
+  - WIP aging;
+  - rework rate;
 - Overall Status;
 - Executive Summary;
 - AI-ranked Top 5 Risks;

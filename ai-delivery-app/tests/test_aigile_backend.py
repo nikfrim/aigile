@@ -278,6 +278,7 @@ class DeliveryIntelligenceTests(unittest.TestCase):
         self.assertLess(health["score"], 55)
         self.assertLess(health["schedule_confidence"], 55)
         self.assertEqual(kanban["metrics"][0]["trend"]["class"], "bad")
+        self.assertEqual(kanban["metrics"][0]["label"], "Throughput")
 
     def test_daily_delivery_brief_render_and_mattermost_format(self):
         brief = {
@@ -304,16 +305,16 @@ class DeliveryIntelligenceTests(unittest.TestCase):
                 "formula": "100 - blockers - red/yellow reviews - open risks - missing AC/type - unreviewed work",
             },
             "kanban_metrics": {
-                "title": "Kanban & Delivery Trends",
+                "title": "Kanban Flow Metrics",
                 "subtitle": "Demo trend layer.",
                 "summary": "Risk load is increasing.",
                 "metrics": [{
-                    "label": "Blockers",
+                    "label": "Throughput",
                     "value": 5,
-                    "unit": "open",
-                    "summary": "Open blockers.",
-                    "history": ["Previous sync: 2 blockers", "Today: 5 blockers"],
-                    "trend": {"class": "bad", "symbol": "up", "label": "+3 vs previous sync"},
+                    "unit": "items/week",
+                    "summary": "Finished work.",
+                    "history": ["Previous sync: 8 items/week", "Today: 5 items/week"],
+                    "trend": {"class": "bad", "symbol": "down", "label": "-3 vs previous sync"},
                 }],
             },
         }
@@ -325,7 +326,8 @@ class DeliveryIntelligenceTests(unittest.TestCase):
         self.assertIn("Executive Summary", html)
         self.assertIn("Project Health Index", html)
         self.assertIn("Near Critical", html)
-        self.assertIn("Kanban &amp; Delivery Trends", html)
+        self.assertIn("Kanban Flow Metrics", html)
+        self.assertIn("Throughput", html)
         self.assertIn("trend-card", html)
         self.assertIn("Top AI Risks", html)
         self.assertIn("Requirement Quality Issues", html)

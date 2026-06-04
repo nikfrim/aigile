@@ -772,106 +772,112 @@ def trend_direction(delta: int, negative_when_up: bool = False) -> dict:
 
 def build_kanban_metrics(report: dict, health_index: dict) -> dict:
     health = report.get("delivery_health") or {}
-    counts = health.get("status_counts") or {}
     signals = report.get("delivery_signals") or {}
     quality = report.get("requirement_quality") or {}
     blockers_count = len(report.get("blockers") or [])
-    top_risks_count = len(report.get("top_risks") or [])
     open_signals = int(signals.get("open") or 0)
     reviewed = int(health.get("reviewed_total") or 0)
     unreviewed = int(health.get("unreviewed_total") or 0)
     missing_ac = int((quality.get("without_acceptance_criteria") or {}).get("count") or 0)
-    waiting_approval = int(health.get("waiting_human_approval") or 0)
+    risk_count = len(report.get("top_risks") or [])
+    throughput = max(2, reviewed + 4)
+    wip = max(1, unreviewed + blockers_count + open_signals // 3)
+    lead_time = min(45, 9 + blockers_count * 3 + missing_ac + open_signals // 4)
+    cycle_time = min(30, 5 + blockers_count * 2 + open_signals // 6)
+    blocked_time = min(20, 2 + blockers_count * 2 + risk_count // 4)
+    flow_efficiency = clamp_int(62 - blockers_count * 5 - open_signals // 2 + reviewed, 8, 95)
+    aging = min(35, 7 + unreviewed // 2 + blockers_count * 3)
+    rework_rate = min(55, 8 + missing_ac * 2 + blockers_count * 3)
     metrics = [
         {
-            "id": "kanban-backlog-pressure",
-            "label": "Backlog pressure",
-            "value": unreviewed + missing_ac,
-            "unit": "items",
+            "id": "flow-throughput",
+            "label": "Throughput",
+            "value": throughput,
+            "unit": "items/week",
+            "delta": -3,
+            "negative_when_up": False,
+            "summary": "How many work items the team is finishing per week in the current demo scope.",
+            "history": ["6 months ago: 4 items/week", "Previous sync: 11 items/week", f"Today: {throughput} items/week", "Signal: output is falling while risk load is growing"],
+        },
+        {
+            "id": "flow-lead-time",
+            "label": "Lead time",
+            "value": lead_time,
+            "unit": "days",
             "delta": 6,
             "negative_when_up": True,
-            "summary": "Unreviewed work plus items that may miss acceptance criteria.",
-            "history": ["6 months ago: backlog was mostly discovery ideas", "Previous sync: 21 weak items", "Today: pressure increased because new risks and unreviewed work accumulated"],
+            "summary": "Elapsed time from request entering the system to completion.",
+            "history": ["6 months ago: 12 days", f"Previous sync: {max(1, lead_time - 6)} days", f"Today: {lead_time} days", "Signal: decisions and blockers are stretching delivery"],
         },
         {
-            "id": "kanban-ready-quality",
-            "label": "Ready quality",
-            "value": reviewed,
-            "unit": "reviewed",
-            "delta": 2,
-            "negative_when_up": False,
-            "summary": "Tasks with AI Review completed and visible status.",
-            "history": ["6 months ago: no AI gate", "Previous sync: 4 reviewed items", f"Today: {reviewed} reviewed items"],
-        },
-        {
-            "id": "kanban-risk-load",
-            "label": "Risk load",
-            "value": top_risks_count + blockers_count,
-            "unit": "signals",
-            "delta": 8,
+            "id": "flow-cycle-time",
+            "label": "Cycle time",
+            "value": cycle_time,
+            "unit": "days",
+            "delta": 4,
             "negative_when_up": True,
-            "summary": "Top risks plus blockers requiring management attention.",
-            "history": ["6 months ago: risks were mostly implicit", "Previous sync: 7 explicit risk/blocker items", "Today: risk load is visible and needs decisions"],
+            "summary": "Time from actual start of work to Done.",
+            "history": ["6 months ago: 6 days", f"Previous sync: {max(1, cycle_time - 4)} days", f"Today: {cycle_time} days", "Signal: started work is spending longer inside delivery"],
         },
         {
-            "id": "kanban-blockers",
-            "label": "Blockers",
-            "value": blockers_count,
-            "unit": "open",
+            "id": "flow-wip",
+            "label": "WIP",
+            "value": wip,
+            "unit": "items",
+            "delta": 5,
+            "negative_when_up": True,
+            "summary": "Work currently in progress or waiting inside the delivery flow.",
+            "history": ["6 months ago: 8 WIP items", f"Previous sync: {max(1, wip - 5)} WIP items", f"Today: {wip} WIP items", "Signal: too much work is open at once"],
+        },
+        {
+            "id": "flow-blocked-time",
+            "label": "Blocked time",
+            "value": blocked_time,
+            "unit": "days",
             "delta": 3,
             "negative_when_up": True,
-            "summary": "Open blockers from AI Review and Mattermost task threads.",
-            "history": ["Previous sync: 2 blockers", f"Today: {blockers_count} blockers", "Action: assign owner and decision path today"],
+            "summary": "Estimated time work spends blocked by decisions, dependencies, or unclear requirements.",
+            "history": ["6 months ago: 2 blocked days", f"Previous sync: {max(0, blocked_time - 3)} blocked days", f"Today: {blocked_time} blocked days", "Signal: blockers need leadership action"],
         },
         {
-            "id": "kanban-team-signals",
-            "label": "Team signals",
-            "value": open_signals,
-            "unit": "open",
-            "delta": 21,
+            "id": "flow-efficiency",
+            "label": "Flow efficiency",
+            "value": flow_efficiency,
+            "unit": "%",
+            "delta": -9,
             "negative_when_up": False,
-            "summary": "Signals captured from team discussions instead of manual reports.",
-            "history": ["6 months ago: meeting context was not captured", "Previous sync: 0 structured signals", f"Today: {open_signals} open signals are visible"],
+            "summary": "Share of time spent in value-producing work versus waiting, blocked, or rework states.",
+            "history": ["6 months ago: 48%", f"Previous sync: {min(95, flow_efficiency + 9)}%", f"Today: {flow_efficiency}%", "Signal: waiting time is eating delivery capacity"],
         },
         {
-            "id": "kanban-human-approval",
-            "label": "Human approvals",
-            "value": waiting_approval,
-            "unit": "waiting",
-            "delta": -1,
+            "id": "flow-aging-wip",
+            "label": "WIP aging",
+            "value": aging,
+            "unit": "days",
+            "delta": 5,
             "negative_when_up": True,
-            "summary": "AI-assisted changes waiting for human approval.",
-            "history": ["Previous sync: one more pending AI action", f"Today: {waiting_approval} approval items in the available data"],
+            "summary": "Oldest active work age, useful for spotting items silently stuck in progress.",
+            "history": ["6 months ago: 9 days", f"Previous sync: {max(1, aging - 5)} days", f"Today: {aging} days", "Signal: at least one active item is aging beyond a healthy threshold"],
         },
         {
-            "id": "kanban-health-index",
-            "label": "Health Index",
-            "value": int(health_index.get("score") or 0),
-            "unit": "/100",
-            "delta": -17,
-            "negative_when_up": False,
-            "summary": "Executive indicator based on blockers, red/yellow AI reviews, weak requirements, and thread risks.",
-            "history": ["Previous sync: 22/100", f"Today: {health_index.get('score')}/100", "Meaning: near-critical and requires management decisions"],
-        },
-        {
-            "id": "kanban-schedule-confidence",
-            "label": "Schedule confidence",
-            "value": int(health_index.get("schedule_confidence") or 0),
-            "unit": "/100",
-            "delta": -14,
-            "negative_when_up": False,
-            "summary": "Likelihood that the current visible scope can move without major intervention.",
-            "history": ["Previous sync: 19/100", f"Today: {health_index.get('schedule_confidence')}/100", "Meaning: delivery needs immediate unblock decisions"],
+            "id": "flow-rework-rate",
+            "label": "Rework rate",
+            "value": rework_rate,
+            "unit": "%",
+            "delta": 7,
+            "negative_when_up": True,
+            "summary": "Share of work likely to return for clarification, QA, or requirement correction.",
+            "history": ["6 months ago: 14%", f"Previous sync: {max(0, rework_rate - 7)}%", f"Today: {rework_rate}%", "Signal: weak acceptance criteria and review findings are creating rework"],
         },
     ]
     for metric in metrics:
         metric["trend"] = trend_direction(int(metric["delta"]), bool(metric["negative_when_up"]))
     return {
         "mode": "demo_previous_sync",
-        "title": "Kanban & Delivery Trends",
-        "subtitle": "Demo trend layer: current dashboard values compared with the previous leadership sync.",
+        "title": "Kanban Flow Metrics",
+        "subtitle": "Demo flow metrics: throughput, lead time, cycle time, WIP, blocked time, flow efficiency, aging, and rework compared with the previous leadership sync.",
         "metrics": metrics,
-        "summary": "Risk load and blockers are increasing, while Health Index and schedule confidence are falling.",
+        "summary": "Throughput is falling while lead time, cycle time, WIP, blocked time, aging, and rework are rising.",
     }
 
 

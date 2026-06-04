@@ -48,7 +48,15 @@ Status: in progress
   - Schedule Confidence indicator;
   - Executive / Kanban / Risks / Team Signals / Data Quality modes;
   - infographic cards for management demo;
-  - Kanban trend cards with expandable dynamic explanations;
+  - Kanban flow metrics with expandable dynamic explanations:
+    - throughput;
+    - lead time;
+    - cycle time;
+    - WIP;
+    - blocked time;
+    - flow efficiency;
+    - WIP aging;
+    - rework rate;
   - AI-ranked top risks from AI Review and Mattermost delivery signals;
   - executive summary, top risks, blockers, decisions, requirement quality, changes since yesterday, and suggested actions.
 - Documentation refresh:

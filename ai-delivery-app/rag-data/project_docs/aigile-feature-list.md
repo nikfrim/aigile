@@ -41,7 +41,8 @@ Updated: 2026-06-03
   - Executive / Kanban / Risks / Team Signals / Data Quality modes;
   - infographic summary cards;
   - AI-ranked top risks table;
-  - Kanban trend cards with green/red direction indicators;
+  - Kanban flow metrics: throughput, lead time, cycle time, WIP, blocked time, flow efficiency, WIP aging, rework rate;
+  - green/red direction indicators for metric movement versus previous leadership sync;
   - expandable trend details for director sync discussions.
 - It uses real available AIGILE signals:
   - Plane issues;
@@ -74,7 +75,7 @@ Updated: 2026-06-03
   - Date;
   - Project Health Index;
   - Schedule Confidence;
-  - Kanban and delivery trend metrics;
+  - Kanban flow metrics;
   - Overall Status;
   - Executive Summary;
   - AI-ranked Top 5 Risks;
