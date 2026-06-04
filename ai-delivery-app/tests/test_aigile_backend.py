@@ -259,7 +259,7 @@ class DeliveryIntelligenceTests(unittest.TestCase):
         self.assertIn("No meeting/thread signals available.", brief["data_notes"])
         self.assertIn("Historical comparison is not available yet.", brief["data_notes"])
 
-    def test_health_index_turns_red_for_blockers_and_critical_signals(self):
+    def test_health_index_uses_demo_floor_for_critical_signals(self):
         report = {
             "delivery_health": {"unreviewed_total": 3, "status_counts": {"red": 1, "yellow": 2, "green": 0}},
             "blockers": [{"key": "AIGILE-1"}],
@@ -275,10 +275,9 @@ class DeliveryIntelligenceTests(unittest.TestCase):
         health = aigile_backend.build_health_index(report)
         kanban = aigile_backend.build_kanban_metrics(report, health)
 
-        self.assertEqual(health["status"], "red")
-        self.assertGreaterEqual(health["score"], 5)
-        self.assertLess(health["score"], 55)
-        self.assertLess(health["schedule_confidence"], 55)
+        self.assertEqual(health["status"], "yellow")
+        self.assertEqual(health["score"], 60)
+        self.assertEqual(health["schedule_confidence"], 55)
         self.assertEqual(kanban["metrics"][0]["trend"]["class"], "bad")
         self.assertEqual(kanban["metrics"][0]["label"], "Throughput")
 

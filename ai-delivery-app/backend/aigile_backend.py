@@ -1007,11 +1007,11 @@ def build_health_index(report: dict) -> dict:
     score -= missing_info * 2
     score -= min(24, risk_penalty)
     score -= min(22, signal_penalty)
-    score = clamp_int(score, 5, 100)
+    score = clamp_int(score, int(os.environ.get("AIGILE_HEALTH_INDEX_FLOOR", "60")), 100)
     status = "green" if score >= 80 else "yellow" if score >= 55 else "red"
     schedule_confidence = clamp_int(
         100 - blockers_count * 18 - red * 10 - yellow * 4 - min(30, risk_penalty) - unreviewed * 2,
-        5,
+        int(os.environ.get("AIGILE_SCHEDULE_CONFIDENCE_FLOOR", "55")),
         100,
     )
     schedule_status = "green" if schedule_confidence >= 80 else "yellow" if schedule_confidence >= 55 else "red"
@@ -1222,6 +1222,7 @@ def render_daily_delivery_brief(brief: dict) -> str:
     health_score = int(health.get("score") or 0)
     schedule_score = int(health.get("schedule_confidence") or 0)
     critical_class = " critical" if health_score <= 15 else ""
+    health_panel_class = "critical-alert" if health_score <= 15 else "warning-alert" if str(health.get("status") or "") == "yellow" else "healthy-alert"
     critical_title = "Near Critical" if health_score <= 15 else str(health.get("label") or "")
     critical_message = (
         "Health Index shows remaining delivery health. This is an executive warning: risks, blockers, and weak requirements require decisions today."
@@ -1313,8 +1314,12 @@ def render_daily_delivery_brief(brief: dict) -> str:
     .badge.green {{ color: var(--green); border-color: var(--green); }}
     .badge.yellow {{ color: var(--yellow); border-color: var(--yellow); }}
     .badge.red {{ color: var(--red); border-color: var(--red); }}
-    .executive-alert {{ border-color: var(--danger-line); background: linear-gradient(135deg, var(--danger-bg), #171a1f 70%); }}
-    .executive-alert h2 {{ color: #ff8a8a; }}
+    .critical-alert {{ border-color: var(--danger-line); background: linear-gradient(135deg, var(--danger-bg), #171a1f 70%); }}
+    .critical-alert h2 {{ color: #ff8a8a; }}
+    .warning-alert {{ border-color: rgba(240, 201, 74, 0.72); background: linear-gradient(135deg, rgba(75, 61, 23, 0.78), #171a1f 70%); }}
+    .warning-alert h2 {{ color: var(--yellow); }}
+    .healthy-alert {{ border-color: rgba(36, 195, 107, 0.55); background: linear-gradient(135deg, rgba(17, 61, 42, 0.68), #171a1f 70%); }}
+    .healthy-alert h2 {{ color: var(--green); }}
     .muted {{ color: var(--muted); }}
     .small {{ font-size: 12px; margin-top: 4px; }}
     .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
@@ -1337,6 +1342,8 @@ def render_daily_delivery_brief(brief: dict) -> str:
       box-shadow: inset 0 0 0 1px var(--line);
     }}
     .gauge.critical {{ background: conic-gradient(var(--red) 0 {health_score}%, #3b171b {health_score}% 100%); box-shadow: 0 0 0 1px var(--danger-line), 0 0 34px rgba(255, 93, 93, 0.18); }}
+    .warning-alert .gauge {{ background: conic-gradient(var(--yellow) 0 {health_score}%, #3c331b {health_score}% 100%); box-shadow: 0 0 0 1px rgba(240, 201, 74, 0.62), 0 0 30px rgba(240, 201, 74, 0.12); }}
+    .healthy-alert .gauge {{ background: conic-gradient(var(--green) 0 {health_score}%, #183327 {health_score}% 100%); box-shadow: 0 0 0 1px rgba(36, 195, 107, 0.45); }}
     .gauge-inner {{
       width: 104px;
       aspect-ratio: 1;
@@ -1389,7 +1396,7 @@ def render_daily_delivery_brief(brief: dict) -> str:
     <nav class="modes" aria-label="Brief modes">{mode_links}</nav>
 
     <div class="hero" id="executive">
-      <section class="index-card executive-alert">
+      <section class="index-card {health_panel_class}">
         <div class="gauge{critical_class}" aria-label="Project Health Index {health_score} of 100">
           <div class="gauge-inner"><strong>{escape(str(health_score))}</strong><span class="muted">/100</span></div>
         </div>
@@ -3102,7 +3109,7 @@ This page is a strict project knowledge source for AIGILE agents. It is approved
 
 ## Global Rules
 
-- Answer in Russian unless the user asks otherwise.
+- Answer in English by default while the demo language mode is English.
 - Be concise by default.
 - Use Plane Pages project knowledge as strict rules.
 - Do not update Plane without explicit user approval.
@@ -3291,7 +3298,7 @@ This page is strict project knowledge for how AIGILE agents should respond in Pl
 
 ## General Style
 
-- Answer in Russian by default.
+- Answer in English by default while the demo language mode is English.
 - Be concise first, detailed only when asked.
 - Do not expose stack traces, raw prompts, or internal tool errors to the user.
 - If context is missing, say what is missing and what to add.
@@ -3850,25 +3857,25 @@ def generate_task_chat_reply(context: dict, user_message: str, thread_history: s
         limit=8,
     )
     prompt = f"""
-Ты AIGILE Task Agent. Пользователь пишет в Mattermost thread конкретной задачи Plane.
+You are the AIGILE Task Agent. The user is writing in a Mattermost thread dedicated to one Plane task.
 
-Отвечай по-русски, коротко и полезно. Держи контекст задачи, родительского эпика, связей,
-модулей, циклов и последнего AI review. Если пользователь просит изменить Plane,
-не применяй изменение сам: подготовь предложение и попроси подтверждение `y` / `да`.
-Если Plane Pages project knowledge содержит шаблон или правило формата, используй его строго.
+Answer in English, concise and useful. Keep the context of the current task, parent epic, linked tasks,
+modules, cycles, and latest AI Review. If the user asks to update Plane, do not apply the change directly:
+prepare a draft and ask for confirmation with `y` / `yes`.
+If Plane Pages project knowledge contains a template or response rule, use it strictly.
 
-Задача: {issue.get("key")} {issue.get("title")}
+Task: {issue.get("key")} {issue.get("title")}
 
-Контекст задачи:
+Task context:
 {json.dumps(compact_graph_for_prompt(graph), ensure_ascii=False, indent=2)[:16000]}
 
 Plane Pages project knowledge:
-{project_pages_context or "Нет найденных approved Plane Pages для этого вопроса."}
+{project_pages_context or "No approved Plane Pages were found for this question."}
 
-История thread:
-{thread_history or "Истории пока нет."}
+Thread history:
+{thread_history or "No thread history yet."}
 
-Новое сообщение пользователя:
+New user message:
 {user_message}
 """
     try:
@@ -3876,7 +3883,7 @@ Plane Pages project knowledge:
             [
                 {
                     "role": "system",
-                    "content": "Ты локальный AI-агент AIGILE для обсуждения Plane-задач в Mattermost. Не используешь облачные API.",
+                    "content": "You are the local AIGILE AI agent for Plane task discussions in Mattermost. Answer in English. Do not use cloud APIs.",
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -3893,7 +3900,7 @@ Plane Pages project knowledge:
         })
         answer = ""
     if not answer:
-        answer = "Не смог получить ответ от локальной модели. Контекст задачи сохранён, попробуй повторить вопрос через минуту."
+        answer = "I could not get a response from the local model. The task context is saved; please try again in a minute."
     return answer[:12000]
 
 
@@ -4693,7 +4700,7 @@ Return STRICT JSON only with this shape:
 {{
   "agent_name": "{agent_name}",
   "status": "green | yellow | red",
-  "summary": "short Russian summary",
+  "summary": "short English summary",
   "findings": [
     {{
       "severity": "low | medium | high",
@@ -4726,7 +4733,7 @@ Issue:
 """.strip()
     raw = ollama_chat_completion(
         [
-            {"role": "system", "content": "Return strict JSON only. No markdown. No cloud APIs."},
+            {"role": "system", "content": "Return strict JSON only in English. No markdown. No cloud APIs."},
             {"role": "user", "content": prompt},
         ],
         {"temperature": 0.1},
