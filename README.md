@@ -8,11 +8,32 @@ Local knowledge artifacts for this version:
 
 - `ai-delivery-app/rag-data/project_docs/aigile-feature-list.md`
 - `ai-delivery-app/rag-data/project_docs/aigile-release-notes.md`
+- `ai-delivery-app/rag-data/project_docs/aigile-product-audit-2026-06-04.md`
 - `ai-delivery-app/rag-data/project_docs/aigile-0.1.1-system-summary.md`
 - `ai-delivery-app/rag-data/project_docs/aigile-0.1.0-system-summary.md`
 - `ai-delivery-app/rag-data/project_docs/aigile-smoke-test-pack.md`
 - `ai-delivery-app/rag-data/project_docs/aigile-task-chat-user-guide.md`
 - `ai-delivery-app/rag-data/decision_log/aigile-0.1.0-product-decisions.md`
+
+## Product Maturity
+
+AIGILE is a local MVP / demo-ready prototype, not a production SaaS product.
+
+What is real and working locally:
+
+- Docker-based local runtime for Plane, Mattermost, n8n, Ollama, Qdrant, RAG backend, and AIGILE backend.
+- Plane AI Review Gate with agent routing, green/yellow/red review results, and local review history.
+- Mattermost task threads with task context memory and explicit human approval before Plane updates.
+- Local RAG collections, document ingestion, Plane Pages sync, and `/kb` knowledge search.
+- Delivery Signals and Daily Delivery Brief based on available Plane, AI Review, and Mattermost signal data.
+
+What is intentionally demo / heuristic:
+
+- Daily Brief health and flow metrics are explainable management indicators, not mathematically validated forecasts.
+- Some runtime demo data can be seeded/reset for interviews and product demos.
+- Plane UI changes are implemented as local patches and can require maintenance when Plane changes.
+
+Detailed audit: `ai-delivery-app/rag-data/project_docs/aigile-product-audit-2026-06-04.md`.
 
 ## Services
 
@@ -394,8 +415,9 @@ Supported for MVP:
 - `.md`
 - `.txt`
 - `.json`
+- text-based `.pdf`
 
-PDF ingestion is intentionally left as a later TODO.
+PDF support is MVP-level: it extracts text where available, logs failures, and skips files that cannot be parsed safely.
 
 Metadata stored per chunk:
 

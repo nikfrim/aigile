@@ -292,7 +292,9 @@ Plane contains an AI Agile site MVP demo dataset:
 
 ## Current Limitations
 
-- Mattermost task chat starts a conversation but does not yet process follow-up user messages.
-- Chat-to-Plane updates are intentionally not implemented yet.
-- AI never updates Plane fields from chat without a future explicit approval flow.
+- Mattermost task chat processes follow-up thread messages, but it is still an MVP polling flow rather than a hardened realtime messaging service.
+- Chat-to-Plane updates exist only through explicit approval commands: `y` / `да`.
+- AI can add approved comments or acceptance-criteria lines, but it does not freely rewrite Plane issues.
 - Plane Community has no reliable custom work item type layer, so labels are the current type source of truth.
+- Daily Brief Health Index and flow metrics are explainable delivery indicators for MVP/demo use, not a statistically validated forecasting model.
+- Plane UI customization is implemented as local patches, not as an official Plane plugin API.
