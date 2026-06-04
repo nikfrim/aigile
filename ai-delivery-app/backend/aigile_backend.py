@@ -755,6 +755,126 @@ def brief_item_text(item: dict, *keys: str, fallback: str = "") -> str:
     return fallback
 
 
+def trend_direction(delta: int, negative_when_up: bool = False) -> dict:
+    if delta == 0:
+        return {"direction": "flat", "symbol": "=", "class": "neutral", "label": "no change"}
+    if negative_when_up:
+        good = delta < 0
+    else:
+        good = delta > 0
+    return {
+        "direction": "up" if delta > 0 else "down",
+        "symbol": "up" if delta > 0 else "down",
+        "class": "good" if good else "bad",
+        "label": f"{'+' if delta > 0 else ''}{delta} vs previous sync",
+    }
+
+
+def build_kanban_metrics(report: dict, health_index: dict) -> dict:
+    health = report.get("delivery_health") or {}
+    counts = health.get("status_counts") or {}
+    signals = report.get("delivery_signals") or {}
+    quality = report.get("requirement_quality") or {}
+    blockers_count = len(report.get("blockers") or [])
+    top_risks_count = len(report.get("top_risks") or [])
+    open_signals = int(signals.get("open") or 0)
+    reviewed = int(health.get("reviewed_total") or 0)
+    unreviewed = int(health.get("unreviewed_total") or 0)
+    missing_ac = int((quality.get("without_acceptance_criteria") or {}).get("count") or 0)
+    waiting_approval = int(health.get("waiting_human_approval") or 0)
+    metrics = [
+        {
+            "id": "kanban-backlog-pressure",
+            "label": "Backlog pressure",
+            "value": unreviewed + missing_ac,
+            "unit": "items",
+            "delta": 6,
+            "negative_when_up": True,
+            "summary": "Unreviewed work plus items that may miss acceptance criteria.",
+            "history": ["6 months ago: backlog was mostly discovery ideas", "Previous sync: 21 weak items", "Today: pressure increased because new risks and unreviewed work accumulated"],
+        },
+        {
+            "id": "kanban-ready-quality",
+            "label": "Ready quality",
+            "value": reviewed,
+            "unit": "reviewed",
+            "delta": 2,
+            "negative_when_up": False,
+            "summary": "Tasks with AI Review completed and visible status.",
+            "history": ["6 months ago: no AI gate", "Previous sync: 4 reviewed items", f"Today: {reviewed} reviewed items"],
+        },
+        {
+            "id": "kanban-risk-load",
+            "label": "Risk load",
+            "value": top_risks_count + blockers_count,
+            "unit": "signals",
+            "delta": 8,
+            "negative_when_up": True,
+            "summary": "Top risks plus blockers requiring management attention.",
+            "history": ["6 months ago: risks were mostly implicit", "Previous sync: 7 explicit risk/blocker items", "Today: risk load is visible and needs decisions"],
+        },
+        {
+            "id": "kanban-blockers",
+            "label": "Blockers",
+            "value": blockers_count,
+            "unit": "open",
+            "delta": 3,
+            "negative_when_up": True,
+            "summary": "Open blockers from AI Review and Mattermost task threads.",
+            "history": ["Previous sync: 2 blockers", f"Today: {blockers_count} blockers", "Action: assign owner and decision path today"],
+        },
+        {
+            "id": "kanban-team-signals",
+            "label": "Team signals",
+            "value": open_signals,
+            "unit": "open",
+            "delta": 21,
+            "negative_when_up": False,
+            "summary": "Signals captured from team discussions instead of manual reports.",
+            "history": ["6 months ago: meeting context was not captured", "Previous sync: 0 structured signals", f"Today: {open_signals} open signals are visible"],
+        },
+        {
+            "id": "kanban-human-approval",
+            "label": "Human approvals",
+            "value": waiting_approval,
+            "unit": "waiting",
+            "delta": -1,
+            "negative_when_up": True,
+            "summary": "AI-assisted changes waiting for human approval.",
+            "history": ["Previous sync: one more pending AI action", f"Today: {waiting_approval} approval items in the available data"],
+        },
+        {
+            "id": "kanban-health-index",
+            "label": "Health Index",
+            "value": int(health_index.get("score") or 0),
+            "unit": "/100",
+            "delta": -17,
+            "negative_when_up": False,
+            "summary": "Executive indicator based on blockers, red/yellow AI reviews, weak requirements, and thread risks.",
+            "history": ["Previous sync: 22/100", f"Today: {health_index.get('score')}/100", "Meaning: near-critical and requires management decisions"],
+        },
+        {
+            "id": "kanban-schedule-confidence",
+            "label": "Schedule confidence",
+            "value": int(health_index.get("schedule_confidence") or 0),
+            "unit": "/100",
+            "delta": -14,
+            "negative_when_up": False,
+            "summary": "Likelihood that the current visible scope can move without major intervention.",
+            "history": ["Previous sync: 19/100", f"Today: {health_index.get('schedule_confidence')}/100", "Meaning: delivery needs immediate unblock decisions"],
+        },
+    ]
+    for metric in metrics:
+        metric["trend"] = trend_direction(int(metric["delta"]), bool(metric["negative_when_up"]))
+    return {
+        "mode": "demo_previous_sync",
+        "title": "Kanban & Delivery Trends",
+        "subtitle": "Demo trend layer: current dashboard values compared with the previous leadership sync.",
+        "metrics": metrics,
+        "summary": "Risk load and blockers are increasing, while Health Index and schedule confidence are falling.",
+    }
+
+
 def issue_ref(key: str | None, title: str | None = None) -> str:
     if not key:
         return title or "n/a"
@@ -939,12 +1059,15 @@ def build_daily_delivery_brief(report: dict | None = None) -> dict:
     if not executive_summary:
         executive_summary = "No urgent delivery action detected from available data."
     health_index = build_health_index(report)
-    if health_index["status"] == "red":
+    if health_index["score"] <= 15:
+        executive_summary = f"Project health is near critical ({health_index['score']}/100). Multiple risks and blockers require management decisions today. {executive_summary}"
+    elif health_index["status"] == "red":
         executive_summary = f"Project health is at risk ({health_index['score']}/100). {executive_summary}"
     elif health_index["status"] == "yellow":
         executive_summary = f"Project health needs attention ({health_index['score']}/100). {executive_summary}"
     else:
         executive_summary = f"Project health looks healthy ({health_index['score']}/100). {executive_summary}"
+    kanban_metrics = build_kanban_metrics(report, health_index)
 
     return {
         "ok": True,
@@ -953,7 +1076,8 @@ def build_daily_delivery_brief(report: dict | None = None) -> dict:
         "project": report.get("project") or "AIGILE",
         "overall_status": report.get("overall_status") or "unknown",
         "health_index": health_index,
-        "analytics_modes": ["Executive", "Risks", "Team Signals", "Data Quality"],
+        "kanban_metrics": kanban_metrics,
+        "analytics_modes": ["Executive", "Kanban", "Risks", "Team Signals", "Data Quality"],
         "executive_summary": executive_summary,
         "top_5_risks": top_risks[:5],
         "top_blockers": blockers[:5],
@@ -994,6 +1118,13 @@ def render_daily_delivery_brief(brief: dict) -> str:
     health = brief.get("health_index") or {}
     health_score = int(health.get("score") or 0)
     schedule_score = int(health.get("schedule_confidence") or 0)
+    critical_class = " critical" if health_score <= 15 else ""
+    critical_title = "Near Critical" if health_score <= 15 else str(health.get("label") or "")
+    critical_message = (
+        "Health Index shows remaining delivery health. This is an executive warning: risks, blockers, and weak requirements require decisions today."
+        if health_score <= 15
+        else "Health Index summarizes current delivery readiness from available signals."
+    )
     mode_links = "".join(
         f'<a class="mode" href="#{escape(str(mode).lower().replace(" ", "-"))}">{escape(str(mode))}</a>'
         for mode in brief.get("analytics_modes") or ["Executive", "Risks", "Team Signals", "Data Quality"]
@@ -1018,6 +1149,26 @@ def render_daily_delivery_brief(brief: dict) -> str:
     decision_count = len(brief.get("decisions_needed") or [])
     quality_count = len(brief.get("requirement_quality_issues") or [])
     source_counts = brief.get("source_counts") or {}
+    kanban = brief.get("kanban_metrics") or {}
+    trend_cards = []
+    for metric in kanban.get("metrics") or []:
+        trend = metric.get("trend") or {}
+        history = "".join(f"<li>{escape(str(item))}</li>" for item in metric.get("history") or [])
+        trend_cards.append(
+            f"""
+            <details class="trend-card">
+              <summary>
+                <span>
+                  <span class="metric-label">{escape(str(metric.get("label") or ""))}</span>
+                  <strong>{escape(str(metric.get("value") or 0))}<small>{escape(str(metric.get("unit") or ""))}</small></strong>
+                </span>
+                <mark class="trend {escape(str(trend.get("class") or "neutral"))}">{escape(str(trend.get("symbol") or "="))} {escape(str(trend.get("label") or ""))}</mark>
+              </summary>
+              <p>{escape(str(metric.get("summary") or ""))}</p>
+              <ul>{history}</ul>
+            </details>
+            """
+        )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1037,6 +1188,8 @@ def render_daily_delivery_brief(brief: dict) -> str:
       --red: #ff5d5d;
       --blue: #78b7ff;
       --purple: #b79cff;
+      --danger-bg: #34181b;
+      --danger-line: #8d2f3b;
     }}
     body {{ margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }}
     main {{ max-width: 1180px; margin: 0 auto; padding: 32px 20px 56px; }}
@@ -1052,6 +1205,8 @@ def render_daily_delivery_brief(brief: dict) -> str:
     .badge.green {{ color: var(--green); border-color: var(--green); }}
     .badge.yellow {{ color: var(--yellow); border-color: var(--yellow); }}
     .badge.red {{ color: var(--red); border-color: var(--red); }}
+    .executive-alert {{ border-color: var(--danger-line); background: linear-gradient(135deg, var(--danger-bg), #171a1f 70%); }}
+    .executive-alert h2 {{ color: #ff8a8a; }}
     .muted {{ color: var(--muted); }}
     .small {{ font-size: 12px; margin-top: 4px; }}
     .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
@@ -1066,6 +1221,7 @@ def render_daily_delivery_brief(brief: dict) -> str:
       background: conic-gradient(var(--blue) 0 {health_score}%, #2a3039 {health_score}% 100%);
       box-shadow: inset 0 0 0 1px var(--line);
     }}
+    .gauge.critical {{ background: conic-gradient(var(--red) 0 {health_score}%, #3b171b {health_score}% 100%); box-shadow: 0 0 0 1px var(--danger-line), 0 0 34px rgba(255, 93, 93, 0.18); }}
     .gauge-inner {{
       width: 104px;
       aspect-ratio: 1;
@@ -1085,13 +1241,24 @@ def render_daily_delivery_brief(brief: dict) -> str:
     .bar > i {{ display: block; height: 100%; width: {schedule_score}%; background: var(--purple); }}
     .modes {{ display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }}
     .mode {{ border: 1px solid var(--line); background: #1d222b; color: var(--text); border-radius: 999px; padding: 8px 11px; font-size: 13px; }}
+    .trend-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }}
+    details.trend-card {{ background: #1d222b; border: 1px solid var(--line); border-radius: 8px; padding: 12px; }}
+    details.trend-card summary {{ cursor: pointer; list-style: none; display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }}
+    details.trend-card summary::-webkit-details-marker {{ display: none; }}
+    .metric-label {{ display: block; color: var(--muted); font-size: 12px; margin-bottom: 8px; }}
+    .trend-card strong {{ font-size: 24px; }}
+    .trend-card small {{ font-size: 13px; color: var(--muted); margin-left: 3px; }}
+    .trend {{ border-radius: 999px; padding: 4px 8px; font-size: 12px; font-weight: 800; white-space: nowrap; background: transparent; }}
+    .trend.good {{ color: var(--green); border: 1px solid rgba(36, 195, 107, 0.5); }}
+    .trend.bad {{ color: var(--red); border: 1px solid rgba(255, 93, 93, 0.55); }}
+    .trend.neutral {{ color: var(--muted); border: 1px solid var(--line); }}
     table {{ width: 100%; border-collapse: collapse; }}
     th, td {{ padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; font-size: 13px; }}
     th {{ color: var(--muted); font-weight: 700; }}
     tr:last-child td {{ border-bottom: none; }}
     .actions {{ display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }}
     .button {{ display: inline-flex; border: 1px solid var(--line); background: #1d222b; color: var(--text); border-radius: 8px; padding: 9px 12px; font-size: 14px; }}
-    @media (max-width: 900px) {{ header, .grid, .hero, .metric-grid {{ display: block; }} .index-card {{ grid-template-columns: 1fr; }} .metric {{ margin-bottom: 10px; }} }}
+    @media (max-width: 900px) {{ header, .grid, .hero, .metric-grid, .trend-grid {{ display: block; }} .index-card {{ grid-template-columns: 1fr; }} .metric, details.trend-card {{ margin-bottom: 10px; }} }}
   </style>
 </head>
 <body>
@@ -1107,13 +1274,14 @@ def render_daily_delivery_brief(brief: dict) -> str:
     <nav class="modes" aria-label="Brief modes">{mode_links}</nav>
 
     <div class="hero" id="executive">
-      <section class="index-card">
-        <div class="gauge" aria-label="Project Health Index {health_score} of 100">
+      <section class="index-card executive-alert">
+        <div class="gauge{critical_class}" aria-label="Project Health Index {health_score} of 100">
           <div class="gauge-inner"><strong>{escape(str(health_score))}</strong><span class="muted">/100</span></div>
         </div>
         <div>
-          <h2>Project Health Index</h2>
-          <p>{escape(str(health.get("label") or ""))}. {escape(str(health.get("formula") or ""))}.</p>
+          <h2>Project Health Index: {escape(critical_title)}</h2>
+          <p><strong>{escape(str(health_score))}/100 health remaining.</strong> {escape(critical_message)}</p>
+          <p class="small">{escape(str(health.get("formula") or ""))}.</p>
           <ul>{drivers}</ul>
         </div>
       </section>
@@ -1131,6 +1299,13 @@ def render_daily_delivery_brief(brief: dict) -> str:
       <div class="metric"><span>Decisions Needed</span><strong>{escape(str(decision_count))}</strong></div>
       <div class="metric"><span>Quality Issues</span><strong>{escape(str(quality_count))}</strong></div>
     </div>
+
+    <section id="kanban">
+      <h2>{escape(str(kanban.get("title") or "Kanban & Delivery Trends"))}</h2>
+      <p>{escape(str(kanban.get("subtitle") or ""))}</p>
+      <div class="trend-grid">{''.join(trend_cards)}</div>
+      <p class="small">{escape(str(kanban.get("summary") or ""))}</p>
+    </section>
 
     <section>
       <h2>Transparency Sources</h2>

@@ -248,6 +248,8 @@ class DeliveryIntelligenceTests(unittest.TestCase):
         self.assertIn("health_index", brief)
         self.assertLess(brief["health_index"]["score"], 100)
         self.assertIn("schedule_confidence", brief["health_index"])
+        self.assertIn("kanban_metrics", brief)
+        self.assertGreaterEqual(len(brief["kanban_metrics"]["metrics"]), 4)
         self.assertIn("yellow AI review", brief["executive_summary"])
         self.assertEqual(brief["top_5_risks"][0]["summary"], "Scope can slip")
         self.assertIn("risk_score", brief["top_5_risks"][0])
@@ -269,10 +271,13 @@ class DeliveryIntelligenceTests(unittest.TestCase):
         }
 
         health = aigile_backend.build_health_index(report)
+        kanban = aigile_backend.build_kanban_metrics(report, health)
 
         self.assertEqual(health["status"], "red")
+        self.assertGreaterEqual(health["score"], 5)
         self.assertLess(health["score"], 55)
         self.assertLess(health["schedule_confidence"], 55)
+        self.assertEqual(kanban["metrics"][0]["trend"]["class"], "bad")
 
     def test_daily_delivery_brief_render_and_mattermost_format(self):
         brief = {
@@ -288,6 +293,29 @@ class DeliveryIntelligenceTests(unittest.TestCase):
             "changes_since_yesterday": {"summary": "Historical comparison is not available yet."},
             "suggested_actions_for_today": ["Escalate access blocker."],
             "data_notes": ["No critical risks found in available data."],
+            "health_index": {
+                "score": 5,
+                "label": "At risk",
+                "status": "red",
+                "schedule_confidence": 5,
+                "schedule_status": "red",
+                "schedule_summary": "Schedule is at risk.",
+                "drivers": ["5 blocker(s) or red impediment(s)"],
+                "formula": "100 - blockers - red/yellow reviews - open risks - missing AC/type - unreviewed work",
+            },
+            "kanban_metrics": {
+                "title": "Kanban & Delivery Trends",
+                "subtitle": "Demo trend layer.",
+                "summary": "Risk load is increasing.",
+                "metrics": [{
+                    "label": "Blockers",
+                    "value": 5,
+                    "unit": "open",
+                    "summary": "Open blockers.",
+                    "history": ["Previous sync: 2 blockers", "Today: 5 blockers"],
+                    "trend": {"class": "bad", "symbol": "up", "label": "+3 vs previous sync"},
+                }],
+            },
         }
 
         html = aigile_backend.render_daily_delivery_brief(brief)
@@ -296,6 +324,9 @@ class DeliveryIntelligenceTests(unittest.TestCase):
         self.assertIn("Daily Delivery Brief", html)
         self.assertIn("Executive Summary", html)
         self.assertIn("Project Health Index", html)
+        self.assertIn("Near Critical", html)
+        self.assertIn("Kanban &amp; Delivery Trends", html)
+        self.assertIn("trend-card", html)
         self.assertIn("Top AI Risks", html)
         self.assertIn("Requirement Quality Issues", html)
         self.assertIn("Daily Delivery Brief", message)

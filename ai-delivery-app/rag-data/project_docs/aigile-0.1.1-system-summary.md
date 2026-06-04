@@ -192,8 +192,9 @@ Daily Brief shows:
 - Date;
 - Project Health Index;
 - Schedule Confidence;
-- Executive / Risks / Team Signals / Data Quality modes;
+- Executive / Kanban / Risks / Team Signals / Data Quality modes;
 - infographic summary cards;
+- Kanban trend cards with expandable dynamic explanations;
 - Overall Status;
 - Executive Summary;
 - AI-ranked Top 5 Risks;

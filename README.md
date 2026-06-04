@@ -237,6 +237,8 @@ Use it after the health dashboard when you want to show delivery-level signals:
 - schedule confidence based on current risks and blockers;
 - several brief modes: Executive, Risks, Team Signals, Data Quality;
 - infographic-style management summary for live demo;
+- Kanban and delivery trend cards with green/red direction indicators;
+- expandable metric history for director sync discussions;
 - overall delivery status;
 - reviewed vs unreviewed work items;
 - green/yellow/red AI Review counts;

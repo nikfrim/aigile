@@ -46,8 +46,9 @@ Status: in progress
   - Mattermost send endpoint `POST /api/daily-delivery-brief/send`;
   - executive Project Health Index;
   - Schedule Confidence indicator;
-  - Executive / Risks / Team Signals / Data Quality modes;
+  - Executive / Kanban / Risks / Team Signals / Data Quality modes;
   - infographic cards for management demo;
+  - Kanban trend cards with expandable dynamic explanations;
   - AI-ranked top risks from AI Review and Mattermost delivery signals;
   - executive summary, top risks, blockers, decisions, requirement quality, changes since yesterday, and suggested actions.
 - Documentation refresh:

@@ -38,9 +38,11 @@ Updated: 2026-06-03
 - Daily Brief now has an executive analytics layer:
   - Project Health Index;
   - Schedule Confidence;
-  - Executive / Risks / Team Signals / Data Quality modes;
+  - Executive / Kanban / Risks / Team Signals / Data Quality modes;
   - infographic summary cards;
-  - AI-ranked top risks table.
+  - AI-ranked top risks table;
+  - Kanban trend cards with green/red direction indicators;
+  - expandable trend details for director sync discussions.
 - It uses real available AIGILE signals:
   - Plane issues;
   - latest AI Review history;
@@ -72,6 +74,7 @@ Updated: 2026-06-03
   - Date;
   - Project Health Index;
   - Schedule Confidence;
+  - Kanban and delivery trend metrics;
   - Overall Status;
   - Executive Summary;
   - AI-ranked Top 5 Risks;
