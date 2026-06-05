@@ -1,5 +1,5 @@
 (function () {
-  const PATCH_VERSION = "20260605-review-disclosure-1";
+  const PATCH_VERSION = "20260605-review-scroll-1";
   if (window.__aigilePlaneActionsVersion === PATCH_VERSION) return;
   if (typeof window.__aigilePlaneActionsCleanup === "function") {
     window.__aigilePlaneActionsCleanup();
@@ -310,17 +310,33 @@
 
   function findIssueDetailSurface() {
     const actionRow = findActionRow();
-    if (!actionRow) return null;
-    let node = actionRow.parentElement;
+    if (actionRow) {
+      let node = actionRow.parentElement;
+      while (node && node !== document.body) {
+        const text = node.innerText || "";
+        const rect = node.getBoundingClientRect();
+        if (rect.width >= 420 && (text.includes("\u0421\u0432\u043e\u0439\u0441\u0442\u0432\u0430") || text.includes("Properties"))) {
+          return node;
+        }
+        node = node.parentElement;
+      }
+      return actionRow.parentElement;
+    }
+
+    const propertiesHeading = Array.from(document.querySelectorAll("*")).find((element) => {
+      const text = (element.innerText || "").trim();
+      return text === "\u0421\u0432\u043e\u0439\u0441\u0442\u0432\u0430" || text === "Properties";
+    });
+    let node = propertiesHeading ? propertiesHeading.parentElement : null;
     while (node && node !== document.body) {
       const text = node.innerText || "";
       const rect = node.getBoundingClientRect();
-      if (rect.width >= 420 && (text.includes("\u0421\u0432\u043e\u0439\u0441\u0442\u0432\u0430") || text.includes("Properties"))) {
+      if (rect.width >= 420 && rect.height > 0 && (text.includes("\u0421\u0432\u043e\u0439\u0441\u0442\u0432\u0430") || text.includes("Properties"))) {
         return node;
       }
       node = node.parentElement;
     }
-    return actionRow.parentElement;
+    return propertiesHeading ? propertiesHeading.parentElement : null;
   }
 
   function createReviewPanel() {
@@ -909,8 +925,13 @@
     };
 
     const issueKey = findIssueKey(actionRow);
-    if (!actionRow || !issueKey) {
+    if (!issueKey) {
       removeActionButtons();
+      return;
+    }
+    if (!actionRow) {
+      removeActionButtons();
+      restoreLatestReviewForIssue(issueKey);
       return;
     }
 
