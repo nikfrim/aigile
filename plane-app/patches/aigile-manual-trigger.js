@@ -1,5 +1,5 @@
 (function () {
-  const PATCH_VERSION = "20260605-review-scroll-1";
+  const PATCH_VERSION = "20260605-review-no-flicker-1";
   if (window.__aigilePlaneActionsVersion === PATCH_VERSION) return;
   if (typeof window.__aigilePlaneActionsCleanup === "function") {
     window.__aigilePlaneActionsCleanup();
@@ -12,6 +12,7 @@
   const RESTORE_REVIEW_STATE = {
     issueKey: null,
     reviewId: null,
+    review: null,
     inFlight: null,
   };
 
@@ -657,6 +658,9 @@
     const agents = Array.isArray(review.agents) ? review.agents : [];
     panel.dataset.issueKey = review.issue_key || findIssueKey() || "";
     panel.dataset.reviewId = review.review_id || "";
+    RESTORE_REVIEW_STATE.issueKey = panel.dataset.issueKey;
+    RESTORE_REVIEW_STATE.reviewId = panel.dataset.reviewId;
+    RESTORE_REVIEW_STATE.review = review;
     panel.innerHTML = "";
 
     const mattermostButton = document.createElement("button");
@@ -789,6 +793,10 @@
       RESTORE_REVIEW_STATE.reviewId = existingPanel.dataset.reviewId;
       return;
     }
+    if (RESTORE_REVIEW_STATE.issueKey === issueKey && RESTORE_REVIEW_STATE.review && !existingPanel) {
+      renderReviewPanel(RESTORE_REVIEW_STATE.review);
+      return;
+    }
     if (RESTORE_REVIEW_STATE.inFlight === issueKey) return;
     if (RESTORE_REVIEW_STATE.issueKey === issueKey && RESTORE_REVIEW_STATE.reviewId && existingPanel) return;
 
@@ -801,14 +809,17 @@
         }
         RESTORE_REVIEW_STATE.issueKey = issueKey;
         RESTORE_REVIEW_STATE.reviewId = null;
+        RESTORE_REVIEW_STATE.review = null;
         return;
       }
       RESTORE_REVIEW_STATE.issueKey = issueKey;
       RESTORE_REVIEW_STATE.reviewId = review.review_id;
+      RESTORE_REVIEW_STATE.review = review;
       renderReviewPanel(review);
     } catch (error) {
       RESTORE_REVIEW_STATE.issueKey = issueKey;
       RESTORE_REVIEW_STATE.reviewId = null;
+      RESTORE_REVIEW_STATE.review = null;
       console.warn("[AIGILE] Failed to restore latest AI review", error);
     } finally {
       if (RESTORE_REVIEW_STATE.inFlight === issueKey) {
