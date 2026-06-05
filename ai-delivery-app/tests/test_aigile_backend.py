@@ -593,6 +593,54 @@ class ReviewGateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Missing review_id"):
             aigile_backend.run_apply_review_suggestion({"issue_key": "AIGILE-1"})
 
+    def test_apply_review_summary_adds_comment_and_ai_a_label(self):
+        issue = FakeIssueForApply()
+        comment = mock.Mock(id="summary-comment-1")
+        review = {
+            "review_id": "review-summary",
+            "issue_key": "AIGILE-1",
+            "detected_type": "Story",
+            "overall_status": "yellow",
+            "agents": [
+                {
+                    "agent_name": "QA Engineer Agent",
+                    "status": "yellow",
+                    "summary": "Acceptance criteria are unclear.",
+                    "findings": [{"severity": "medium", "title": "Missing AC"}],
+                }
+            ],
+        }
+        summary = {
+            "overallStatus": "yellow",
+            "taskReadinessScore": 70,
+            "discoveryReadiness": "green",
+            "developmentReadiness": "yellow",
+            "summaryText": "Task needs clearer acceptance criteria before development.",
+            "requiredBeforeDevelopment": [],
+            "recommendedImprovements": [{"title": "Missing acceptance criteria", "severity": "medium", "impactedAgents": ["QA Engineer Agent"]}],
+        }
+        with (
+            mock.patch.object(aigile_backend, "REVIEW_GATE_ENABLED", True),
+            mock.patch.object(aigile_backend, "find_issue", return_value=issue),
+            mock.patch.object(aigile_backend, "issue_to_payload", return_value={"id": "issue-1", "key": "AIGILE-1", "labels": ["type: Story"]}),
+            mock.patch.object(aigile_backend, "find_review_history_item", return_value=review),
+            mock.patch.object(aigile_backend, "create_issue_comment", return_value=comment) as create_comment,
+            mock.patch.object(aigile_backend, "mark_issue_with_ai_label", return_value="AI-A") as mark_label,
+            mock.patch.object(aigile_backend, "append_apply_history") as apply_history,
+            mock.patch.object(aigile_backend, "append_execution_log"),
+        ):
+            result = aigile_backend.run_apply_review_summary_comment({"issue_key": "AIGILE-1", "review_id": "review-summary", "summary": summary})
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(issue.saved)
+        self.assertEqual(result["label"], "AI-A")
+        comment_text = create_comment.call_args.args[1]
+        self.assertIn("AI Review Summary", comment_text)
+        self.assertIn("Task readiness: 70%", comment_text)
+        self.assertIn("Missing acceptance criteria", comment_text)
+        mark_label.assert_called_once_with(issue, "assisted")
+        apply_history.assert_called_once()
+
     def test_task_chat_message_contains_issue_and_review_context(self):
         issue = {
             "key": "AIGILE-1",

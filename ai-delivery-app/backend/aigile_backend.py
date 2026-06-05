@@ -3648,6 +3648,106 @@ def run_apply_review_suggestion(payload: dict) -> dict:
     }
 
 
+def format_review_summary_comment(review: dict, summary: dict) -> str:
+    def issue_lines(items: list[dict]) -> list[str]:
+        lines = []
+        for item in items[:5]:
+            title = item.get("title") or "Review issue"
+            severity = item.get("severity") or "medium"
+            agents = ", ".join(item.get("impactedAgents") or item.get("impacted_agents") or [])
+            lines.append(f"- {title} ({severity})" + (f" — impacts: {agents}" if agents else ""))
+        return lines or ["- No items."]
+
+    lines = [
+        "## AI Review Summary",
+        "",
+        "AI did not overwrite the task description. This summary is added for human review and follow-up.",
+        "",
+        f"- Overall status: {summary.get('overallStatus') or review.get('overall_status') or 'yellow'}",
+        f"- Task readiness: {summary.get('taskReadinessScore', 'n/a')}%",
+        f"- Discovery readiness: {summary.get('discoveryReadiness') or 'n/a'}",
+        f"- Development readiness: {summary.get('developmentReadiness') or 'n/a'}",
+        "",
+        "### Short conclusion",
+        "",
+        str(summary.get("summaryText") or "Task needs review before delivery."),
+        "",
+        "### Required before development",
+        "",
+    ]
+    lines.extend(issue_lines(summary.get("requiredBeforeDevelopment") or []))
+    lines.extend(["", "### Recommended improvements", ""])
+    lines.extend(issue_lines(summary.get("recommendedImprovements") or []))
+    lines.extend(["", "### Agent details", ""])
+    for agent in review.get("agents") or []:
+        lines.append(f"- {agent.get('agent_name') or 'AI Agent'}: {agent.get('status') or 'yellow'} — {agent.get('summary') or ''}")
+    return "\n".join(lines).strip() + "\n"
+
+
+def run_apply_review_summary_comment(payload: dict) -> dict:
+    if not REVIEW_GATE_ENABLED:
+        return {"ok": False, "disabled": True, "error": "AI Review Gate is disabled"}
+
+    review_id = str(payload.get("review_id") or "").strip()
+    if not review_id:
+        raise ValueError("Missing review_id")
+
+    close_old_connections()
+    issue = find_issue(payload)
+    issue_payload = issue_to_payload(issue)
+    issue_key = issue_payload["key"]
+    review = find_review_history_item(issue_key, review_id)
+    if not review:
+        raise ValueError("Review history item was not found")
+
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    markdown_block = format_review_summary_comment(review, summary)
+    before = {
+        "description_html": issue.description_html or "",
+        "description_stripped": issue.description_stripped or "",
+        "labels": list(issue.labels.filter(deleted_at__isnull=True).values_list("name", flat=True)),
+    }
+
+    with transaction.atomic():
+        comment = create_issue_comment(issue, markdown_block)
+        label_name = mark_issue_with_ai_label(issue, "assisted")
+
+    issue.refresh_from_db()
+    after = {
+        "description_html": issue.description_html or "",
+        "description_stripped": issue.description_stripped or "",
+        "labels": list(issue.labels.filter(deleted_at__isnull=True).values_list("name", flat=True)),
+        "comment_id": str(comment.id),
+    }
+    apply_id = str(uuid.uuid4())
+    event = {
+        "ok": True,
+        "apply_id": apply_id,
+        "review_id": review_id,
+        "issue_key": issue_key,
+        "agent_name": "AI Review Summary",
+        "summary": summary,
+        "applied_at": utc_now_iso(),
+        "applied_by": payload.get("applied_by") or "Plane UI",
+        "comment_id": str(comment.id),
+        "comment": markdown_block,
+        "before": before,
+        "after": after,
+    }
+    append_apply_history(event)
+    append_execution_log({"event": "ai_review_summary_comment", "status": "success", "issue_key": issue_key, "review_id": review_id, "apply_id": apply_id})
+    return {
+        "ok": True,
+        "status": "applied",
+        "apply_id": apply_id,
+        "review_id": review_id,
+        "issue_key": issue_key,
+        "label": label_name or "AI-A",
+        "comment_id": str(comment.id),
+        "message": "AI review summary was added to Plane comments.",
+    }
+
+
 def mattermost_api(path: str, method: str = "GET", payload=None) -> dict:
     if not MATTERMOST_BOT_TOKEN:
         raise RuntimeError("Mattermost bot token is not configured")
@@ -5079,6 +5179,17 @@ class Handler(BaseHTTPRequestHandler):
                 json_response(self, 400, {"ok": False, "error": str(exc)})
             except Exception as exc:
                 logger.exception("AI review suggestion apply failed")
+                json_response(self, 500, {"ok": False, "error": str(exc)})
+            return
+        if parsed.path == "/api/apply-review-summary-comment":
+            try:
+                payload = read_body(self)
+                result = run_apply_review_summary_comment(payload)
+                json_response(self, 200 if result.get("ok") else 400, result)
+            except ValueError as exc:
+                json_response(self, 400, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                logger.exception("AI review summary comment apply failed")
                 json_response(self, 500, {"ok": False, "error": str(exc)})
             return
         if parsed.path == "/api/start-task-chat":

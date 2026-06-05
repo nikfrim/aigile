@@ -1,5 +1,5 @@
 (function () {
-  const PATCH_VERSION = "20260528-stable-actions-4";
+  const PATCH_VERSION = "20260605-review-summary-1";
   if (window.__aigilePlaneActionsVersion === PATCH_VERSION) return;
   if (typeof window.__aigilePlaneActionsCleanup === "function") {
     window.__aigilePlaneActionsCleanup();
@@ -266,6 +266,24 @@
     return data;
   }
 
+  async function runApplyReviewSummary(review, summary) {
+    const response = await fetch(`${API_BASE}/api/apply-review-summary-comment`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspace_slug: "aigile",
+        issue_key: review.issue_key || findIssueKey(),
+        review_id: review.review_id,
+        summary,
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.ok === false) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    return data;
+  }
+
   function statusColor(status) {
     if (status === "green") return "rgb(34, 197, 94)";
     if (status === "red") return "rgb(248, 113, 113)";
@@ -340,6 +358,216 @@
       .replace(/'/g, "&#039;");
   }
 
+  function severityRank(severity) {
+    const normalized = String(severity || "medium").toLowerCase();
+    if (normalized === "critical") return 4;
+    if (normalized === "high") return 3;
+    if (normalized === "medium") return 2;
+    if (normalized === "low") return 1;
+    return 2;
+  }
+
+  function normalizeIssueTitle(value) {
+    const text = String(value || "").toLowerCase();
+    if (text.includes("acceptance") || text.includes("criteria")) return "acceptance criteria";
+    if (text.includes("business") || text.includes("outcome")) return "business outcome";
+    if (text.includes("scope")) return "scope boundaries";
+    if (text.includes("depend")) return "dependencies";
+    if (text.includes("user") || text.includes("persona")) return "target users";
+    if (text.includes("security")) return "security review";
+    if (text.includes("test") || text.includes("qa")) return "testability";
+    return text.replace(/[^a-z0-9а-яё ]/gi, " ").replace(/\s+/g, " ").trim() || "review issue";
+  }
+
+  function friendlyIssueTitle(key) {
+    const labels = {
+      "acceptance criteria": "Missing acceptance criteria",
+      "business outcome": "Missing business outcome",
+      "scope boundaries": "Unclear scope boundaries",
+      dependencies: "Missing dependencies",
+      "target users": "Unclear target users",
+      "security review": "Security review needed",
+      testability: "Testability is unclear",
+    };
+    return labels[key] || key.replace(/\b\w/g, (char) => char.toUpperCase());
+  }
+
+  function groupReviewIssues(agents) {
+    const groups = new Map();
+    for (const agent of agents) {
+      const findings = Array.isArray(agent.findings) ? agent.findings : [];
+      for (const finding of findings) {
+        const key = normalizeIssueTitle(`${finding.title || ""} ${finding.description || ""}`);
+        const existing = groups.get(key) || {
+          id: key,
+          title: friendlyIssueTitle(key),
+          severity: "low",
+          impactedAgents: [],
+          descriptions: [],
+          recommendations: [],
+        };
+        if (severityRank(finding.severity) > severityRank(existing.severity)) {
+          existing.severity = String(finding.severity || "medium").toLowerCase();
+        }
+        if (agent.agent_name && !existing.impactedAgents.includes(agent.agent_name)) {
+          existing.impactedAgents.push(agent.agent_name);
+        }
+        if (finding.description) existing.descriptions.push(finding.description);
+        if (finding.recommendation) existing.recommendations.push(finding.recommendation);
+        groups.set(key, existing);
+      }
+    }
+    return Array.from(groups.values()).sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
+  }
+
+  function calculateReadinessScore(groupedIssues) {
+    const penalties = { low: 5, medium: 10, high: 15, critical: 25 };
+    const score = groupedIssues.reduce((value, issue) => value - (penalties[issue.severity] || 10), 100);
+    return Math.max(0, Math.min(100, score));
+  }
+
+  function readinessStatus(score, forcedStatus) {
+    if (forcedStatus === "red" || score < 50) return "red";
+    if (forcedStatus === "yellow" || score < 85) return "yellow";
+    return "green";
+  }
+
+  function buildReviewSummary(review) {
+    const agents = Array.isArray(review.agents) ? review.agents : [];
+    const groupedIssues = groupReviewIssues(agents);
+    const required = groupedIssues.filter((issue) => severityRank(issue.severity) >= 3).slice(0, 5);
+    const recommended = groupedIssues.filter((issue) => severityRank(issue.severity) < 3).slice(0, 5);
+    const score = calculateReadinessScore(groupedIssues);
+    const status = review.overall_status || readinessStatus(score);
+    const hasDiscoveryGap = groupedIssues.some((issue) => ["business outcome", "scope boundaries", "target users"].includes(issue.id));
+    const hasDevelopmentGap = groupedIssues.some((issue) => ["acceptance criteria", "dependencies", "testability"].includes(issue.id) || severityRank(issue.severity) >= 3);
+    const discoveryReadiness = hasDiscoveryGap ? "yellow" : status === "red" ? "yellow" : "green";
+    const developmentReadiness = hasDevelopmentGap ? (required.length ? "red" : "yellow") : status === "red" ? "yellow" : "green";
+    const summaryText = groupedIssues.length
+      ? "Task needs clarification before development. Focus on the required items first, then use agent details for deeper review."
+      : "Task looks ready from the available AI review. Agent details are still available below.";
+
+    return {
+      overallStatus: status,
+      taskReadinessScore: score,
+      discoveryReadiness,
+      developmentReadiness,
+      summaryText,
+      requiredBeforeDevelopment: required,
+      recommendedImprovements: recommended,
+      topIssues: groupedIssues.slice(0, 5),
+    };
+  }
+
+  function renderIssueList(title, items, emptyText) {
+    const rows = items.length
+      ? items.map((item) => `
+          <li style="margin:6px 0">
+            <div style="font-weight:700;color:rgb(226,232,240)">${escapeHtml(item.title)} <span style="color:${statusColor(item.severity === "high" || item.severity === "critical" ? "red" : "yellow")};font-size:11px;text-transform:uppercase">${escapeHtml(item.severity)}</span></div>
+            <div style="color:rgb(148,163,184);font-size:12px">Impacts: ${escapeHtml(item.impactedAgents.join(", ") || "AI Review")}</div>
+          </li>
+        `).join("")
+      : `<li style="color:rgb(148,163,184)">${escapeHtml(emptyText)}</li>`;
+    return `
+      <div style="border:1px solid rgb(39,43,48);border-radius:8px;padding:10px;background:rgb(15,17,19)">
+        <div style="font-weight:800;color:rgb(238,242,246);margin-bottom:6px">${escapeHtml(title)}</div>
+        <ul style="margin:0;padding-left:18px">${rows}</ul>
+      </div>
+    `;
+  }
+
+  function createSummaryActionButton(label, onClick) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    applyInlineButtonStyle(button);
+    button.addEventListener("click", onClick);
+    return button;
+  }
+
+  function renderSummaryBlock(panel, review, summary, mattermostButton, statusBadge) {
+    const scoreColor = statusColor(summary.overallStatus);
+    const summaryBlock = document.createElement("div");
+    summaryBlock.style.border = `1px solid ${summary.overallStatus === "red" ? "rgba(248,113,113,0.42)" : summary.overallStatus === "yellow" ? "rgba(234,179,8,0.42)" : "rgba(34,197,94,0.42)"}`;
+    summaryBlock.style.borderRadius = "10px";
+    summaryBlock.style.padding = "12px";
+    summaryBlock.style.background = "linear-gradient(135deg, rgba(24,26,28,0.98), rgba(17,19,22,0.98))";
+
+    summaryBlock.innerHTML = `
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:12px;flex-wrap:wrap">
+        <div>
+          <div style="font-weight:800;font-size:15px;color:rgb(238,242,246)">AI Review — ${escapeHtml(summary.overallStatus.toUpperCase())}</div>
+          <div style="color:rgb(148,163,184);font-size:12px">Type: ${escapeHtml(review.detected_type || "Task")}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span style="border:1px solid ${scoreColor};color:${scoreColor};border-radius:999px;padding:2px 8px;font-weight:800;text-transform:uppercase">${escapeHtml(summary.overallStatus)}</span>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:minmax(110px,140px) 1fr;gap:14px;align-items:center">
+        <div style="border:1px solid rgb(39,43,48);border-radius:8px;padding:10px;text-align:center;background:rgb(15,17,19)">
+          <div style="font-size:28px;font-weight:900;color:${scoreColor}">${escapeHtml(summary.taskReadinessScore)}%</div>
+          <div style="font-size:11px;color:rgb(148,163,184);font-weight:700">Task Readiness</div>
+        </div>
+        <div>
+          <div style="color:rgb(226,232,240);font-weight:700;margin-bottom:6px">Short conclusion</div>
+          <div style="color:rgb(203,213,225)">${escapeHtml(summary.summaryText)}</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+            <span style="color:${statusColor(summary.discoveryReadiness)};font-weight:800">Discovery: ${escapeHtml(summary.discoveryReadiness.toUpperCase())}</span>
+            <span style="color:${statusColor(summary.developmentReadiness)};font-weight:800">Development: ${escapeHtml(summary.developmentReadiness.toUpperCase())}</span>
+          </div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;margin-top:12px">
+        ${renderIssueList("Required before development", summary.requiredBeforeDevelopment, "No blockers found.")}
+        ${renderIssueList("Recommended improvements", summary.recommendedImprovements, "No non-blocking improvements found.")}
+      </div>
+    `;
+
+    const actions = document.createElement("div");
+    actions.style.display = "flex";
+    actions.style.gap = "8px";
+    actions.style.flexWrap = "wrap";
+    actions.style.marginTop = "12px";
+    const sendSummaryButton = createSummaryActionButton("Send summary to comments", async () => {
+      sendSummaryButton.disabled = true;
+      sendSummaryButton.textContent = "Sending...";
+      sendSummaryButton.style.opacity = "0.72";
+      try {
+        const result = await runApplyReviewSummary(review, summary);
+        sendSummaryButton.textContent = "Sent to comments";
+        sendSummaryButton.style.color = "rgb(134,239,172)";
+        sendSummaryButton.style.borderColor = "rgba(34,197,94,0.55)";
+        showToast(`${result.label || "AI-A"}: ${result.issue_key}`, "success");
+      } catch (error) {
+        sendSummaryButton.disabled = false;
+        sendSummaryButton.textContent = "Send summary to comments";
+        sendSummaryButton.style.opacity = "1";
+        showToast(`Summary comment failed: ${error.message}`, "error");
+      }
+    });
+    const questionsButton = createSummaryActionButton("Create clarification questions", () => {
+      const questions = summary.topIssues.map((issue) => `- What should be clarified for: ${issue.title}?`).join("\n") || "- No clarification questions needed.";
+      showToast(questions, "success");
+    });
+    const improveButton = createSummaryActionButton("Improve task with AI", () => {
+      showToast("Draft improvement flow is prepared for the next MVP step. Use summary comments or task chat approval for now.", "success");
+    });
+    const detailsButton = createSummaryActionButton("View agent details", () => {
+      const details = panel.querySelector("#aigile-agent-details");
+      if (details) {
+        details.open = true;
+        details.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    });
+    actions.appendChild(improveButton);
+    actions.appendChild(questionsButton);
+    actions.appendChild(sendSummaryButton);
+    actions.appendChild(mattermostButton);
+    actions.appendChild(detailsButton);
+    summaryBlock.appendChild(actions);
+    panel.appendChild(summaryBlock);
+  }
+
   function renderReviewPanel(review) {
     const surface = findIssueDetailSurface();
     if (!surface) return;
@@ -351,22 +579,6 @@
     const agents = Array.isArray(review.agents) ? review.agents : [];
     panel.innerHTML = "";
 
-    const header = document.createElement("div");
-    header.style.display = "flex";
-    header.style.alignItems = "center";
-    header.style.justifyContent = "space-between";
-    header.style.gap = "10px";
-    header.style.marginBottom = "10px";
-    header.innerHTML = `
-      <div>
-        <div style="font-weight:700;font-size:14px;color:rgb(238,242,246)">AI \u0430\u043d\u0430\u043b\u0438\u0437</div>
-        <div style="color:rgb(148,163,184);font-size:12px">\u0422\u0438\u043f: ${escapeHtml(review.detected_type || "Task")}</div>
-      </div>
-    `;
-    const headerActions = document.createElement("div");
-    headerActions.style.display = "flex";
-    headerActions.style.alignItems = "center";
-    headerActions.style.gap = "8px";
     const mattermostButton = document.createElement("button");
     mattermostButton.type = "button";
     mattermostButton.textContent = "\u0412 Mattermost";
@@ -396,10 +608,20 @@
     statusBadge.style.fontWeight = "700";
     statusBadge.style.textTransform = "uppercase";
     statusBadge.textContent = status;
-    headerActions.appendChild(mattermostButton);
-    headerActions.appendChild(statusBadge);
-    header.appendChild(headerActions);
-    panel.appendChild(header);
+    const reviewSummary = buildReviewSummary(review);
+    renderSummaryBlock(panel, review, reviewSummary, mattermostButton, statusBadge);
+
+    const agentDetails = document.createElement("details");
+    agentDetails.id = "aigile-agent-details";
+    agentDetails.style.marginTop = "12px";
+    agentDetails.style.borderTop = "1px solid rgb(39,43,48)";
+    agentDetails.style.paddingTop = "10px";
+    const agentSummary = document.createElement("summary");
+    agentSummary.style.cursor = "pointer";
+    agentSummary.style.fontWeight = "800";
+    agentSummary.style.color = "rgb(238,242,246)";
+    agentSummary.textContent = "Agent Details";
+    agentDetails.appendChild(agentSummary);
 
     let agentIndex = 0;
     for (const agent of agents) {
@@ -458,9 +680,10 @@
       body.appendChild(applyButton);
 
       details.appendChild(body);
-      panel.appendChild(details);
+      agentDetails.appendChild(details);
       agentIndex += 1;
     }
+    panel.appendChild(agentDetails);
 
     const anchor = surface.querySelector("#aigile-ai-review-panel");
     if (!anchor) {
