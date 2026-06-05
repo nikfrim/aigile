@@ -27,10 +27,10 @@ from plane.db.models import CycleIssue, Issue, IssueComment, IssueLabel, IssueRe
 
 PORT = int(os.environ.get("AIGILE_BACKEND_PORT", "8091"))
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://ollama:11434").rstrip("/")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:3b")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:7b-instruct")
 OLLAMA_FALLBACK_MODELS = [
     item.strip()
-    for item in os.environ.get("AIGILE_OLLAMA_FALLBACK_MODELS", "qwen2.5-coder:3b,qwen3:8b,qwen2.5-coder:7b").split(",")
+    for item in os.environ.get("AIGILE_OLLAMA_FALLBACK_MODELS", "qwen2.5-coder:7b-instruct").split(",")
     if item.strip()
 ]
 RAG_BACKEND_URL = os.environ.get("RAG_BACKEND_URL", "http://rag-backend:8092").rstrip("/")
@@ -2211,20 +2211,22 @@ def read_knowledge_base() -> str:
 
 
 def ollama_model_candidates() -> list[str]:
-    candidates = [OLLAMA_MODEL]
-    for model in OLLAMA_FALLBACK_MODELS:
-        if model not in candidates:
-            candidates.append(model)
+    configured = [OLLAMA_MODEL] + [model for model in OLLAMA_FALLBACK_MODELS if model != OLLAMA_MODEL]
+    installed = []
     try:
         req = Request(f"{OLLAMA_BASE_URL}/api/tags", method="GET")
         with urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode("utf-8"))
         for item in data.get("models") or []:
             name = item.get("name") or item.get("model")
-            if name and "embed" not in name.lower() and "30b" not in name.lower() and name not in candidates:
-                candidates.append(name)
+            if name and "embed" not in name.lower() and "30b" not in name.lower():
+                installed.append(name)
     except Exception as exc:
         logger.warning("Could not read Ollama model list: %s", exc)
+
+    candidates = [model for model in configured if model in installed]
+    candidates.extend(model for model in installed if model not in candidates)
+    candidates.extend(model for model in configured if model not in candidates)
     return candidates
 
 
@@ -4744,6 +4746,116 @@ Issue:
     return normalize_agent_review(agent_name, parsed)
 
 
+def review_agents_batch(agent_names: list[str], issue_type: str, issue: dict, context: str) -> list[dict]:
+    prompt = f"""
+You are the AIGILE AI Review Gate.
+Review one Plane task from the perspective of every listed agent.
+
+Task type: {issue_type}
+Agents: {", ".join(agent_names)}
+
+Plane Pages Project Knowledge is strict. If it contains agent rules, templates, or review criteria,
+follow them over generic assumptions.
+
+Return STRICT JSON only with this shape:
+{{
+  "agents": [
+    {{
+      "agent_name": "one of the requested agent names",
+      "status": "green | yellow | red",
+      "summary": "short English summary",
+      "findings": [
+        {{
+          "severity": "low | medium | high",
+          "title": "finding title",
+          "description": "problem description",
+          "recommendation": "what should be changed",
+          "can_be_applied": true
+        }}
+      ],
+      "proposed_task_patch": {{
+        "title": "",
+        "description": "",
+        "acceptance_criteria": [],
+        "test_cases": [],
+        "risks": [],
+        "dependencies": []
+      }}
+    }}
+  ]
+}}
+
+Rules:
+- Return exactly one review object for each requested agent.
+- Use green only when no required changes exist for that role.
+- Use yellow for useful improvements when the task can proceed.
+- Use red for blockers, contradictions, missing critical info, or serious risk.
+- Do not add markdown or commentary outside JSON.
+
+Local knowledge context:
+{context[:8000]}
+
+Issue:
+{json.dumps(issue, ensure_ascii=False, indent=2)}
+""".strip()
+    raw = ollama_chat_completion(
+        [
+            {"role": "system", "content": "Return strict JSON only in English. No markdown. No cloud APIs."},
+            {"role": "user", "content": prompt},
+        ],
+        {"temperature": 0.1},
+    )
+    content = strip_code_fence(raw.get("message", {}).get("content", "{}"))
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        return [safe_agent_fallback(agent_name, content[:1000]) for agent_name in agent_names]
+
+    raw_agents = parsed.get("agents") if isinstance(parsed, dict) else parsed
+    if not isinstance(raw_agents, list):
+        return [safe_agent_fallback(agent_name, "Batch review did not return an agents array.") for agent_name in agent_names]
+
+    by_name = {
+        str(item.get("agent_name") or "").strip().lower(): item
+        for item in raw_agents
+        if isinstance(item, dict)
+    }
+    normalized = []
+    for agent_name in agent_names:
+        item = by_name.get(agent_name.lower())
+        if not item:
+            normalized.append(safe_agent_fallback(agent_name, "Batch review did not include this agent."))
+        else:
+            normalized.append(normalize_agent_review(agent_name, item))
+    return normalized
+
+
+def review_agents(agent_names: list[str], issue_type: str, issue: dict, context: str) -> list[dict]:
+    if not agent_names:
+        return []
+
+    if os.environ.get("AIGILE_REVIEW_BATCH_ENABLED", "true").lower() == "true":
+        return review_agents_batch(agent_names, issue_type, issue, context)
+
+    max_workers = max(1, min(len(agent_names), int(os.environ.get("AIGILE_REVIEW_MAX_WORKERS", "3"))))
+    results: list[dict | None] = [None] * len(agent_names)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(review_agent, agent_name, issue_type, issue, context): index
+            for index, agent_name in enumerate(agent_names)
+        }
+        for future in as_completed(futures):
+            index = futures[future]
+            agent_name = agent_names[index]
+            try:
+                results[index] = future.result()
+            except Exception as exc:
+                logger.warning("Agent review failed for %s: %s", agent_name, exc)
+                results[index] = safe_agent_fallback(agent_name, str(exc))
+
+    return [result for result in results if result is not None]
+
+
 def run_review_gate(payload: dict) -> dict:
     if not REVIEW_GATE_ENABLED:
         return {"ok": False, "disabled": True, "error": "AI Review Gate is disabled"}
@@ -4767,7 +4879,7 @@ def run_review_gate(payload: dict) -> dict:
     detected_type = detect_issue_type(issue_payload)
     agent_names = agents_for_issue_type(detected_type)
     context = build_review_context(issue_payload, detected_type, agent_names)
-    agents = [review_agent(agent_name, detected_type, issue_payload, context) for agent_name in agent_names]
+    agents = review_agents(agent_names, detected_type, issue_payload, context)
     gate_review = deterministic_gate_review(detected_type, issue_payload)
     if gate_review:
         agents.insert(0, gate_review)

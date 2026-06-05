@@ -152,6 +152,7 @@ services:
       REDIS_URL: redis://plane-redis:6379/
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL}
+      AIGILE_OLLAMA_FALLBACK_MODELS: ${AIGILE_OLLAMA_FALLBACK_MODELS:-qwen2.5-coder:7b-instruct}
       RAG_BACKEND_URL: http://rag-backend:8092
       QDRANT_URL: http://qdrant:6333
       N8N_INTERNAL_URL: http://n8n:5678
