@@ -1,5 +1,5 @@
 (function () {
-  const PATCH_VERSION = "20260605-review-restore-1";
+  const PATCH_VERSION = "20260605-review-disclosure-1";
   if (window.__aigilePlaneActionsVersion === PATCH_VERSION) return;
   if (typeof window.__aigilePlaneActionsCleanup === "function") {
     window.__aigilePlaneActionsCleanup();
@@ -503,6 +503,50 @@
     return button;
   }
 
+  function createReviewDisclosure(review, summary) {
+    const status = summary.overallStatus || review.overall_status || "yellow";
+    const color = statusColor(status);
+    const disclosure = document.createElement("details");
+    disclosure.id = "aigile-ai-review-disclosure";
+    disclosure.style.border = `1px solid ${status === "red" ? "rgba(248,113,113,0.42)" : status === "yellow" ? "rgba(234,179,8,0.42)" : "rgba(34,197,94,0.42)"}`;
+    disclosure.style.borderRadius = "10px";
+    disclosure.style.background = "rgb(15,17,19)";
+    disclosure.style.overflow = "hidden";
+
+    const disclosureSummary = document.createElement("summary");
+    disclosureSummary.style.cursor = "pointer";
+    disclosureSummary.style.listStyle = "none";
+    disclosureSummary.style.display = "flex";
+    disclosureSummary.style.alignItems = "center";
+    disclosureSummary.style.justifyContent = "space-between";
+    disclosureSummary.style.gap = "12px";
+    disclosureSummary.style.padding = "10px 12px";
+    disclosureSummary.style.userSelect = "none";
+    disclosureSummary.innerHTML = `
+      <div style="display:flex;align-items:center;gap:10px;min-width:0;flex-wrap:wrap">
+        <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${color};box-shadow:0 0 0 3px rgba(255,255,255,0.04)"></span>
+        <strong style="color:rgb(238,242,246)">AI Review</strong>
+        <span style="color:rgb(148,163,184)">Type: ${escapeHtml(review.detected_type || "Task")}</span>
+        <span style="color:${color};font-weight:800;text-transform:uppercase">${escapeHtml(status)}</span>
+        <span style="color:rgb(203,213,225);font-weight:700">Readiness ${escapeHtml(summary.taskReadinessScore)}%</span>
+      </div>
+      <span style="color:rgb(148,163,184);font-size:12px;white-space:nowrap">Open details</span>
+    `;
+
+    disclosure.addEventListener("toggle", () => {
+      const hint = disclosureSummary.querySelector("span:last-child");
+      if (hint) hint.textContent = disclosure.open ? "Hide details" : "Open details";
+    });
+
+    const body = document.createElement("div");
+    body.id = "aigile-ai-review-disclosure-body";
+    body.style.padding = "0 12px 12px";
+    body.style.borderTop = "1px solid rgb(39,43,48)";
+    disclosure.appendChild(disclosureSummary);
+    disclosure.appendChild(body);
+    return { disclosure, body };
+  }
+
   function renderSummaryBlock(panel, review, summary, mattermostButton, statusBadge) {
     const scoreColor = statusColor(summary.overallStatus);
     const summaryBlock = document.createElement("div");
@@ -629,7 +673,9 @@
     statusBadge.style.textTransform = "uppercase";
     statusBadge.textContent = status;
     const reviewSummary = buildReviewSummary(review);
-    renderSummaryBlock(panel, review, reviewSummary, mattermostButton, statusBadge);
+    const disclosure = createReviewDisclosure(review, reviewSummary);
+    panel.appendChild(disclosure.disclosure);
+    renderSummaryBlock(disclosure.body, review, reviewSummary, mattermostButton, statusBadge);
 
     const agentDetails = document.createElement("details");
     agentDetails.id = "aigile-agent-details";
@@ -703,7 +749,7 @@
       agentDetails.appendChild(details);
       agentIndex += 1;
     }
-    panel.appendChild(agentDetails);
+    disclosure.body.appendChild(agentDetails);
 
     const anchor = surface.querySelector("#aigile-ai-review-panel");
     if (!anchor) {
