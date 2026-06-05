@@ -1,5 +1,5 @@
 (function () {
-  const PATCH_VERSION = "20260605-review-summary-1";
+  const PATCH_VERSION = "20260605-review-restore-1";
   if (window.__aigilePlaneActionsVersion === PATCH_VERSION) return;
   if (typeof window.__aigilePlaneActionsCleanup === "function") {
     window.__aigilePlaneActionsCleanup();
@@ -9,6 +9,11 @@
 
   const API_BASE = "http://localhost:8091";
   const KEY_PATTERN = /\b[A-Z][A-Z0-9_]{1,11}-\d+\b/;
+  const RESTORE_REVIEW_STATE = {
+    issueKey: null,
+    reviewId: null,
+    inFlight: null,
+  };
 
   const ACTION_ROW_TEXTS = [
     "\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043f\u043e\u0434\u044d\u043b\u0435\u043c\u0435\u043d\u0442",
@@ -227,6 +232,19 @@
       throw error;
     }
     return data;
+  }
+
+  async function fetchLatestReview(issueKey) {
+    const response = await fetch(`${API_BASE}/api/review-history?issue_key=${encodeURIComponent(issueKey)}&limit=1`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.ok === false) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    const reviews = Array.isArray(data.reviews) ? data.reviews : [];
+    return reviews.length ? reviews[reviews.length - 1] : null;
   }
 
   async function runApplySuggestion(review, agent, agentIndex, findingIndex) {
@@ -577,6 +595,8 @@
     panel.style.background = "rgb(18, 20, 22)";
     const status = review.overall_status || "yellow";
     const agents = Array.isArray(review.agents) ? review.agents : [];
+    panel.dataset.issueKey = review.issue_key || findIssueKey() || "";
+    panel.dataset.reviewId = review.review_id || "";
     panel.innerHTML = "";
 
     const mattermostButton = document.createElement("button");
@@ -699,6 +719,42 @@
     }
   }
 
+  async function restoreLatestReviewForIssue(issueKey) {
+    if (!issueKey) return;
+    const existingPanel = document.getElementById("aigile-ai-review-panel");
+    if (existingPanel && existingPanel.dataset.issueKey === issueKey && existingPanel.dataset.reviewId) {
+      RESTORE_REVIEW_STATE.issueKey = issueKey;
+      RESTORE_REVIEW_STATE.reviewId = existingPanel.dataset.reviewId;
+      return;
+    }
+    if (RESTORE_REVIEW_STATE.inFlight === issueKey) return;
+    if (RESTORE_REVIEW_STATE.issueKey === issueKey && RESTORE_REVIEW_STATE.reviewId && existingPanel) return;
+
+    RESTORE_REVIEW_STATE.inFlight = issueKey;
+    try {
+      const review = await fetchLatestReview(issueKey);
+      if (!review || !review.review_id) {
+        if (existingPanel && existingPanel.dataset.issueKey && existingPanel.dataset.issueKey !== issueKey) {
+          existingPanel.remove();
+        }
+        RESTORE_REVIEW_STATE.issueKey = issueKey;
+        RESTORE_REVIEW_STATE.reviewId = null;
+        return;
+      }
+      RESTORE_REVIEW_STATE.issueKey = issueKey;
+      RESTORE_REVIEW_STATE.reviewId = review.review_id;
+      renderReviewPanel(review);
+    } catch (error) {
+      RESTORE_REVIEW_STATE.issueKey = issueKey;
+      RESTORE_REVIEW_STATE.reviewId = null;
+      console.warn("[AIGILE] Failed to restore latest AI review", error);
+    } finally {
+      if (RESTORE_REVIEW_STATE.inFlight === issueKey) {
+        RESTORE_REVIEW_STATE.inFlight = null;
+      }
+    }
+  }
+
   function renderBlockedPanel(error) {
     const surface = findIssueDetailSurface();
     if (!surface) return;
@@ -806,7 +862,8 @@
       loadedAt: new Date().toISOString(),
     };
 
-    if (!actionRow || !findIssueKey(actionRow)) {
+    const issueKey = findIssueKey(actionRow);
+    if (!actionRow || !issueKey) {
       removeActionButtons();
       return;
     }
@@ -828,6 +885,7 @@
       }
       if (button.dataset.state === "idle") setButtonState(button, action, "idle");
     }
+    restoreLatestReviewForIssue(issueKey);
   }
 
   let syncQueued = false;
